@@ -334,7 +334,11 @@ def _garmin_client():
     # Save session so future calls skip the login endpoint
     try:
         os.makedirs(GARMIN_TOKEN_DIR, exist_ok=True)
-        client.garth.dump(GARMIN_TOKEN_DIR)
+        try:
+            client.garth.dump(GARMIN_TOKEN_DIR)
+        except AttributeError:
+            import garth
+            garth.dump(GARMIN_TOKEN_DIR)
     except Exception as e:
         logging.warning(f"Could not save Garmin session: {e}")
 
