@@ -999,6 +999,7 @@ def main():
         t_data.start()
 
         last_full_refresh_day = -1
+        partial_refresh_count = 0
 
         while True:
             start_time = time.time()
@@ -1017,8 +1018,20 @@ def main():
                     time.sleep(2)
                     epd.init_Part()
                     last_full_refresh_day = now_dt.day
+                    partial_refresh_count = 0
                 else:
-                    logging.info("Partial Refresh")
+                    partial_refresh_count += 1
+                    # Every 60 cycles (~30 min), push a white frame first so all pixels
+                    # get driven from white→black, clearing accumulated charge drift.
+                    if partial_refresh_count % 60 == 0:
+                        logging.info("Partial Refresh (ghost-clear cycle)")
+                        from PIL import Image as PILImage
+                        white_img = PILImage.new('1', (epd.width, epd.height), 255)
+                        white_buf = epd.getbuffer(white_img)
+                        epd.display_Partial(white_buf, 0, 0, epd.width, epd.height)
+                        del white_img, white_buf
+                    else:
+                        logging.info("Partial Refresh")
                     epd.display_Partial(buf, 0, 0, epd.width, epd.height)
 
                 signal.alarm(0)
