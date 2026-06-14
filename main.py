@@ -998,31 +998,33 @@ def main():
         t_data.daemon = True
         t_data.start()
 
-        refresh_counter = 0
+        last_full_refresh_day = -1
 
         while True:
             start_time = time.time()
             try:
-                signal.alarm(20)
+                signal.alarm(60)
                 image = render_screen(epd, fonts)
                 buf = epd.getbuffer(image)
 
-                if refresh_counter >= 120:  # full refresh every ~1 hour (120 × 30s)
-                    logging.info("Full Refresh cycle")
+                now_dt = datetime.now()
+                do_full = now_dt.hour == 3 and now_dt.day != last_full_refresh_day
+
+                if do_full:
+                    logging.info("Full Refresh cycle (scheduled 3am)")
                     epd.init()
                     epd.display(buf)
                     time.sleep(2)
                     epd.init_Part()
-                    refresh_counter = 0
+                    last_full_refresh_day = now_dt.day
                 else:
                     logging.info("Partial Refresh")
                     epd.display_Partial(buf, 0, 0, epd.width, epd.height)
-                    refresh_counter += 1
 
                 signal.alarm(0)
                 del image
                 del buf
-                if refresh_counter % 20 == 0: gc.collect()
+                gc.collect()
 
             except HardwareTimeoutError:
                 logging.critical("HARDWARE HANG DETECTED!")
