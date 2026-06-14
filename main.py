@@ -984,8 +984,6 @@ def main():
         epd.init()
         epd.Clear()
         time.sleep(1)
-        # init_Part is called here; first content frame is rendered below after fonts load
-        epd.init_Part()
         _startup_full_refresh_pending = True
 
         def load_font(name, size):
@@ -1024,25 +1022,15 @@ def main():
                     data_changed = data_store.needs_full_refresh
                     data_store.needs_full_refresh = False
 
-                do_full = do_full or data_changed or _startup_full_refresh_pending
+                if _startup_full_refresh_pending:
+                    _startup_full_refresh_pending = False
 
-                if do_full:
-                    if _startup_full_refresh_pending:
-                        logging.info("Full Refresh (startup)")
-                        _startup_full_refresh_pending = False
-                    elif data_changed:
-                        logging.info("Full Refresh (data updated)")
-                    else:
-                        logging.info("Full Refresh (scheduled 3am)")
-                    epd.init()
-                    epd.display(buf)
-                    time.sleep(2)
-                    epd.init_Part()
-                    _sync_dtm1(epd, buf)
-                    last_full_refresh_day = now_dt.day
-                else:
-                    logging.info("Partial Refresh")
-                    epd.display_Partial(buf, 0, 0, epd.width, epd.height)
+                # Partial refresh accumulates pixel drift on this panel regardless
+                # of DTM1 state — full refresh only.
+                logging.info("Full Refresh")
+                epd.init()
+                epd.display(buf)
+                last_full_refresh_day = now_dt.day
 
                 signal.alarm(0)
                 del image
