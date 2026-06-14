@@ -46,15 +46,12 @@ LOG_FILE = os.path.join(BASE_DIR, 'dashboard.log')
 ENABLE_BAMBU = False
 ENABLE_ANTIGRAVITY = False
 ENABLE_CALENDAR = True  # Fetches an ICS URL and shows the next upcoming event
-ENABLE_STRAVA = True
+ENABLE_GARMIN = True
 
 # --- API ENDPOINTS ---
 API_ENDPOINTS = {
     'weather': 'https://api.open-meteo.com/v1/forecast',
     'aqi': 'https://air-quality-api.open-meteo.com/v1/air-quality',
-    'strava_token': 'https://www.strava.com/oauth/token',
-    'strava_auth': 'https://www.strava.com/oauth/authorize',
-    'strava_activities': 'https://www.strava.com/api/v3/athlete/activities',
 }
 
 # --- CONFIGURATION ---
@@ -68,10 +65,9 @@ PRINTER_CONF = {
     'ACCESS_CODE': ''
 }
 
-STRAVA_CONF = {
-    'CLIENT_ID': '',
-    'CLIENT_SECRET': '',
-    'TOKEN_FILE': os.path.join(BASE_DIR, 'strava_token.json'),
+GARMIN_CONF = {
+    'EMAIL': '',
+    'PASSWORD': '',
 }
 
 # ICS calendar URL — paste any public or private ICS link (Google Calendar, iCloud, etc.)
@@ -208,7 +204,7 @@ class DataStore:
         self.aqhi = 0
         self.printer = {'status': 'OFFLINE'}
         self.calendar = {'title': '', 'start': None}  # next upcoming event
-        self.strava = {
+        self.garmin = {
             'rides': 0, 'total_distance': 0,
             'rides_curr': 0, 'distance_curr': 0,
             'rides_prev': 0, 'distance_prev': 0,
@@ -220,7 +216,7 @@ class DataStore:
 
         self.last_update = {
             'weather': 0, 'printer': 0, 'calendar': 0,
-            'strava': 0, 'ping': 0,
+            'garmin': 0, 'ping': 0,
             'claude': 0, 'antigravity': 0
         }
 
@@ -279,109 +275,58 @@ def time_until(iso_str):
 
 # --- AUTH & FETCH THREADS ---
 
-def auth_strava():
-    global ENABLE_STRAVA
-    if not ENABLE_STRAVA: return
-
-    if os.path.exists(STRAVA_CONF['TOKEN_FILE']):
-        return
-
-    print("\n--- STRAVA CONFIGURATION REQUIRED ---")
-    c_id = STRAVA_CONF.get('CLIENT_ID') or input("Enter Strava Client ID (or press Enter to disable): ").strip()
-    if not c_id:
-        ENABLE_STRAVA = False
-        return
-
-    c_secret = STRAVA_CONF.get('CLIENT_SECRET') or input("Enter Strava Client Secret: ").strip()
-
-    import urllib.parse
-    auth_url = (
-        f"{API_ENDPOINTS['strava_auth']}?client_id={c_id}&response_type=code"
-        f"&redirect_uri=http://localhost&approval_prompt=force&scope=activity:read_all"
-    )
-    print(f"\nOpen this URL in your browser:\n\n  {auth_url}\n")
-    print("After authorizing, copy the 'code' value from the redirect URL.")
-    code_input = input("Paste the code (or full redirect URL): ").strip()
-    if not code_input:
-        ENABLE_STRAVA = False
-        return
-
-    if 'code=' in code_input:
-        params = urllib.parse.parse_qs(urllib.parse.urlparse(code_input).query)
-        code = params.get('code', [code_input])[0]
-    else:
-        code = code_input
+def fetch_garmin_data():
+    try:
+        from garminconnect import Garmin
+    except ImportError:
+        logging.error("garminconnect not installed: pip install garminconnect --break-system-packages")
+        return None
 
     try:
-        resp = requests.post(API_ENDPOINTS['strava_token'], data={
-            'client_id': c_id, 'client_secret': c_secret,
-            'code': code, 'grant_type': 'authorization_code',
-        })
-        resp.raise_for_status()
-        token_data = resp.json()
-        token_data['client_id'] = c_id
-        token_data['client_secret'] = c_secret
-        with open(STRAVA_CONF['TOKEN_FILE'], 'w') as f:
-            json.dump(token_data, f, indent=4)
-        print("Strava authorization successful!\n")
+        client = Garmin(GARMIN_CONF['EMAIL'], GARMIN_CONF['PASSWORD'])
+        client.login()
     except Exception as e:
-        print(f"Failed to get Strava token: {e}")
-        ENABLE_STRAVA = False
+        logging.error(f"Garmin login failed: {e}")
+        return None
 
-
-def fetch_strava_data():
-    if not os.path.exists(STRAVA_CONF['TOKEN_FILE']): return None
-    with open(STRAVA_CONF['TOKEN_FILE'], 'r') as f:
-        token_data = json.load(f)
-
-    c_id = token_data.get('client_id')
-    c_secret = token_data.get('client_secret')
-
-    if time.time() > token_data.get('expires_at', 0):
-        new_token = net.get_json(API_ENDPOINTS['strava_token'], data={
-            'client_id': c_id, 'client_secret': c_secret,
-            'grant_type': 'refresh_token', 'refresh_token': token_data.get('refresh_token'),
-        }, method='POST')
-        if new_token and 'access_token' in new_token:
-            new_token['client_id'] = c_id
-            new_token['client_secret'] = c_secret
-            token_data = new_token
-            with open(STRAVA_CONF['TOKEN_FILE'], 'w') as f:
-                json.dump(token_data, f, indent=4)
-        else:
-            return None
-
-    headers = {"Authorization": f"Bearer {token_data['access_token']}"}
     now_year = datetime.now().year
-    start_curr = datetime(now_year, 1, 1).timestamp()
-    start_prev = datetime(now_year - 1, 1, 1).timestamp()
-    end_prev   = datetime(now_year - 1, 12, 31, 23, 59, 59).timestamp()
+    bike_types = {'cycling', 'road_biking', 'mountain_biking', 'gravel_cycling',
+                  'indoor_cycling', 'virtual_ride', 'e_bike_fitness', 'recumbent_cycling'}
+    hike_types = {'hiking', 'walking', 'trail_hiking'}
 
-    page = 1
     total_rides, total_dist = 0, 0
     rides_curr, dist_curr = 0, 0
     rides_prev, dist_prev = 0, 0
     bike_total, hike_total = 0, 0
 
-    while True:
-        acts = net.get_json(f"{API_ENDPOINTS['strava_activities']}?page={page}&per_page=100", headers=headers)
-        if not acts: break
-        for act in acts:
-            t = act.get('type', '')
-            d = act.get('distance', 0)
-            ts = datetime.strptime(act['start_date'], "%Y-%m-%dT%H:%M:%SZ").timestamp()
-            if t in ['Ride', 'VirtualRide', 'EBikeRide', 'GravelRide', 'MountainBikeRide']:
-                total_rides += 1
-                total_dist += d
-                bike_total += d
-                if ts >= start_curr:
-                    rides_curr += 1; dist_curr += d
-                elif start_prev <= ts <= end_prev:
-                    rides_prev += 1; dist_prev += d
-            elif t in ['Hike', 'Walk']:
-                hike_total += d
-        if len(acts) < 100: break
-        page += 1
+    try:
+        # Fetch all activities since start of last year in batches
+        start_date = datetime(now_year - 1, 1, 1).strftime('%Y-%m-%d')
+        end_date   = datetime.now().strftime('%Y-%m-%d')
+        activities = client.get_activities_by_date(start_date, end_date)
+    except Exception as e:
+        logging.error(f"Garmin activity fetch failed: {e}")
+        return None
+
+    for act in activities:
+        type_key = act.get('activityType', {}).get('typeKey', '').lower()
+        d = act.get('distance', 0) or 0
+        start_str = act.get('startTimeLocal', '')
+        try:
+            act_year = int(start_str[:4])
+        except Exception:
+            continue
+
+        if type_key in bike_types:
+            total_rides += 1
+            total_dist += d
+            bike_total += d
+            if act_year == now_year:
+                rides_curr += 1; dist_curr += d
+            elif act_year == now_year - 1:
+                rides_prev += 1; dist_prev += d
+        elif type_key in hike_types:
+            hike_total += d
 
     return {
         'rides': total_rides, 'total_distance': round(total_dist / 1000, 1),
@@ -450,12 +395,12 @@ def update_data_thread():
                     data_store.aqhi = max(1, round(aqhi))
             data_store.last_update['weather'] = now
 
-        if ENABLE_STRAVA and now - data_store.last_update['strava'] > 900:
-            s_data = fetch_strava_data()
-            if s_data:
+        if ENABLE_GARMIN and now - data_store.last_update['garmin'] > 900:
+            g_data = fetch_garmin_data()
+            if g_data:
                 with data_store.lock:
-                    data_store.strava = s_data
-            data_store.last_update['strava'] = now
+                    data_store.garmin = g_data
+            data_store.last_update['garmin'] = now
 
         if ENABLE_BAMBU:
             update_interval = 5 if is_connected else 15
@@ -646,7 +591,7 @@ def render_screen(epd, fonts):
         cal_event = data_store.calendar.copy()
         claude = data_store.claude.copy()
         antigravity = data_store.antigravity.copy()
-        strava = data_store.strava.copy()
+        garmin = data_store.garmin.copy()
         ping = data_store.ping.copy()
     finally:
         data_store.lock.release()
@@ -659,18 +604,18 @@ def render_screen(epd, fonts):
     # Widget 1: Strava
     y1 = 20
     now_y = datetime.now().year
-    draw_icon(draw, col1_x, y1, "icon_strava", (60, 60))
-    draw.text((col1_x + 70, y1), "STRAVA STATS", font=fonts['28'], fill=0)
+    draw_icon(draw, col1_x, y1, "icon_rocket", (60, 60))
+    draw.text((col1_x + 70, y1), "GARMIN STATS", font=fonts['28'], fill=0)
     draw.text((col1_x + 70, y1 + 35),
-              f"{now_y}: {strava['distance_curr']} km  |  {now_y - 1}: {strava['distance_prev']} km",
+              f"{now_y}: {garmin['distance_curr']} km  |  {now_y - 1}: {garmin['distance_prev']} km",
               font=fonts['20'], fill=0)
     draw.text((col1_x + 70, y1 + 60),
-              f"Total: {strava['total_distance']} km  |  {strava['rides']} rides",
+              f"Total: {garmin['total_distance']} km  |  {garmin['rides']} rides",
               font=fonts['20'], fill=0)
     draw_icon(draw, col1_x + 70, y1 + 85, "icon_bike", (30, 30))
-    draw.text((col1_x + 105, y1 + 90), f"{strava['bike_total']} km", font=fonts['20'], fill=0)
+    draw.text((col1_x + 105, y1 + 90), f"{garmin['bike_total']} km", font=fonts['20'], fill=0)
     draw_icon(draw, col1_x + 220, y1 + 85, "icon_hike", (30, 30))
-    draw.text((col1_x + 255, y1 + 90), f"{strava['hike_total']} km", font=fonts['20'], fill=0)
+    draw.text((col1_x + 255, y1 + 90), f"{garmin['hike_total']} km", font=fonts['20'], fill=0)
 
     draw.line((col1_x, 150, col_w - 20, 150), fill=0, width=2)
 
@@ -952,7 +897,6 @@ def render_screen(epd, fonts):
 
 # --- MAIN LOOP ---
 def main():
-    auth_strava()
     auth_claude()
     auth_antigravity()
 
