@@ -977,7 +977,9 @@ def main():
         epd.init()
         epd.Clear()
         time.sleep(1)
+        # init_Part is called here; first content frame is rendered below after fonts load
         epd.init_Part()
+        _startup_full_refresh_pending = True
 
         def load_font(name, size):
             return ImageFont.truetype(os.path.join(FONT_DIR, name), size)
@@ -1009,10 +1011,15 @@ def main():
                 buf = epd.getbuffer(image)
 
                 now_dt = datetime.now()
-                do_full = now_dt.hour == 3 and now_dt.day != last_full_refresh_day
+                do_full = (now_dt.hour == 3 and now_dt.day != last_full_refresh_day) \
+                          or _startup_full_refresh_pending
 
                 if do_full:
-                    logging.info("Full Refresh cycle (scheduled 3am)")
+                    if _startup_full_refresh_pending:
+                        logging.info("Full Refresh cycle (startup)")
+                        _startup_full_refresh_pending = False
+                    else:
+                        logging.info("Full Refresh cycle (scheduled 3am)")
                     epd.init()
                     epd.display(buf)
                     time.sleep(2)
@@ -1021,10 +1028,11 @@ def main():
                     partial_refresh_count = 0
                 else:
                     partial_refresh_count += 1
-                    # Every 60 cycles (~30 min), push a white frame first so all pixels
-                    # get driven from white→black, clearing accumulated charge drift.
-                    if partial_refresh_count % 60 == 0:
-                        logging.info("Partial Refresh (ghost-clear cycle)")
+                    # Every 3 cycles (~90 s), push a white frame before content so all
+                    # pixels get a full white→target drive. Partial waveform is too weak
+                    # to keep static content crisp without this periodic reset.
+                    if partial_refresh_count % 3 == 0:
+                        logging.info("Partial Refresh (ghost-clear)")
                         from PIL import Image as PILImage
                         white_img = PILImage.new('1', (epd.width, epd.height), 255)
                         white_buf = epd.getbuffer(white_img)
