@@ -208,7 +208,7 @@ class DataStore:
             'rides': 0, 'total_distance': 0,
             'rides_curr': 0, 'distance_curr': 0,
             'rides_prev': 0, 'distance_prev': 0,
-            'bike_total': 0, 'hike_total': 0,
+            'bike_total': 0, 'hike_total': 0, 'run_total': 0,
         }
         self.claude = {'error': False, 'five_hour': {}, 'seven_day': {}}
         self.antigravity = {'error': False, 'models': []}
@@ -312,11 +312,13 @@ def fetch_garmin_data():
     bike_types = {'cycling', 'road_biking', 'mountain_biking', 'gravel_cycling',
                   'indoor_cycling', 'virtual_ride', 'e_bike_fitness', 'recumbent_cycling'}
     hike_types = {'hiking', 'walking', 'trail_hiking'}
+    run_types  = {'running', 'trail_running', 'treadmill_running', 'track_running',
+                  'ultra_run', 'obstacle_run', 'indoor_running'}
 
     total_rides, total_dist = 0, 0
     rides_curr, dist_curr = 0, 0
     rides_prev, dist_prev = 0, 0
-    bike_total, hike_total = 0, 0
+    bike_total, hike_total, run_total = 0, 0, 0
 
     try:
         # Fetch all activities since start of last year in batches
@@ -346,12 +348,16 @@ def fetch_garmin_data():
                 rides_prev += 1; dist_prev += d
         elif type_key in hike_types:
             hike_total += d
+        elif type_key in run_types:
+            run_total += d
 
     return {
         'rides': total_rides, 'total_distance': round(total_dist / 1000, 1),
         'rides_curr': rides_curr, 'distance_curr': round(dist_curr / 1000, 1),
         'rides_prev': rides_prev, 'distance_prev': round(dist_prev / 1000, 1),
-        'bike_total': round(bike_total / 1000, 1), 'hike_total': round(hike_total / 1000, 1),
+        'bike_total': round(bike_total / 1000, 1),
+        'hike_total': round(hike_total / 1000, 1),
+        'run_total': round(run_total / 1000, 1),
     }
 
 
@@ -631,10 +637,12 @@ def render_screen(epd, fonts):
     draw.text((col1_x + 70, y1 + 60),
               f"Total: {garmin['total_distance']} km  |  {garmin['rides']} rides",
               font=fonts['20'], fill=0)
-    draw_icon(draw, col1_x + 70, y1 + 85, "icon_bike", (30, 30))
-    draw.text((col1_x + 105, y1 + 90), f"{garmin['bike_total']} km", font=fonts['20'], fill=0)
-    draw_icon(draw, col1_x + 220, y1 + 85, "icon_hike", (30, 30))
-    draw.text((col1_x + 255, y1 + 90), f"{garmin['hike_total']} km", font=fonts['20'], fill=0)
+    draw_icon(draw, col1_x + 70, y1 + 85, "icon_bike", (28, 28))
+    draw.text((col1_x + 100, y1 + 90), f"{garmin['bike_total']}km", font=fonts['20'], fill=0)
+    draw_icon(draw, col1_x + 190, y1 + 85, "icon_hike", (28, 28))
+    draw.text((col1_x + 220, y1 + 90), f"{garmin['hike_total']}km", font=fonts['20'], fill=0)
+    draw_icon(draw, col1_x + 310, y1 + 85, "icon_rocket", (28, 28))
+    draw.text((col1_x + 340, y1 + 90), f"{garmin['run_total']}km", font=fonts['20'], fill=0)
 
     draw.line((col1_x, 150, col_w - 20, 150), fill=0, width=2)
 
