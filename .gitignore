@@ -1,6 +1,7 @@
 config.py
 claude_creds.json
 strava_token.json
+.garth/
 usage.json
 limits.json
 *.log

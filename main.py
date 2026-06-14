@@ -275,18 +275,37 @@ def time_until(iso_str):
 
 # --- AUTH & FETCH THREADS ---
 
-def fetch_garmin_data():
+GARMIN_TOKEN_DIR = os.path.join(BASE_DIR, '.garth')
+
+
+def _garmin_client():
     try:
         from garminconnect import Garmin
     except ImportError:
         logging.error("garminconnect not installed: pip install garminconnect --break-system-packages")
         return None
 
+    client = Garmin(GARMIN_CONF['EMAIL'], GARMIN_CONF['PASSWORD'])
+    if os.path.exists(GARMIN_TOKEN_DIR):
+        try:
+            client.login(GARMIN_TOKEN_DIR)
+            return client
+        except Exception:
+            pass  # token expired, fall through to full login
+
     try:
-        client = Garmin(GARMIN_CONF['EMAIL'], GARMIN_CONF['PASSWORD'])
         client.login()
+        client.garth.dump(GARMIN_TOKEN_DIR)
     except Exception as e:
         logging.error(f"Garmin login failed: {e}")
+        return None
+
+    return client
+
+
+def fetch_garmin_data():
+    client = _garmin_client()
+    if not client:
         return None
 
     now_year = datetime.now().year
