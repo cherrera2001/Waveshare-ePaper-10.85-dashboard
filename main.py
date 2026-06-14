@@ -332,16 +332,16 @@ def _garmin_client():
         logging.error(f"Garmin login failed: {e}")
         return None
 
-    # Save session so future calls skip the login endpoint
+    # Save session so future calls skip the login endpoint.
+    # garminconnect uses garth internally; install it with:
+    #   pip install garth --break-system-packages
     try:
         os.makedirs(GARMIN_TOKEN_DIR, exist_ok=True)
-        try:
-            client.garth.dump(GARMIN_TOKEN_DIR)
-        except AttributeError:
-            import garth
-            garth.dump(GARMIN_TOKEN_DIR)
-    except Exception as e:
-        logging.warning(f"Could not save Garmin session: {e}")
+        client.garth.dump(GARMIN_TOKEN_DIR)
+        logging.info("Garmin session saved to %s", GARMIN_TOKEN_DIR)
+    except AttributeError:
+        logging.warning("Could not save Garmin session: garth not available — "
+                        "run: pip install garth --break-system-packages")
 
     return client
 
