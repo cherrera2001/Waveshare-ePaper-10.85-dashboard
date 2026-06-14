@@ -1038,8 +1038,21 @@ def main():
                     epd.init_Part()
                     last_full_refresh_day = now_dt.day
                 else:
-                    logging.info("Partial Refresh")
-                    epd.display_Partial(buf, 0, 0, epd.width, epd.height)
+                    # Partial-refresh column 3 only (clock + progress bars).
+                    # Columns 1 & 2 (Garmin, weather) stay at their last full-refresh
+                    # state and never accumulate partial-waveform drift.
+                    # Col3 starts at x=936 (byte 117) — entirely on the Slave controller.
+                    row_stride   = epd.width // 8          # 170 bytes per full row
+                    col3_x_px    = (epd.width // 3) * 2 + 30  # 936
+                    col3_x_byte  = col3_x_px // 8          # 117
+                    col3_w_bytes = row_stride - col3_x_byte # 53
+                    col3_buf = bytearray(col3_w_bytes * epd.height)
+                    for row in range(epd.height):
+                        src = row * row_stride + col3_x_byte
+                        dst = row * col3_w_bytes
+                        col3_buf[dst:dst + col3_w_bytes] = buf[src:src + col3_w_bytes]
+                    logging.info("Partial Refresh (col3 clock region)")
+                    epd.display_Partial(bytes(col3_buf), col3_x_px, 0, epd.width, epd.height)
 
                 signal.alarm(0)
                 del image
