@@ -305,7 +305,6 @@ def time_until(iso_str):
 
 # --- AUTH & FETCH THREADS ---
 
-GARMIN_TOKEN_DIR = os.path.join(BASE_DIR, '.garth')
 
 
 def _garmin_client():
@@ -315,41 +314,13 @@ def _garmin_client():
         logging.error("garminconnect not installed: pip install garminconnect --break-system-packages")
         return None
 
-    # Try loading a saved session first (avoids hitting Garmin's login endpoint)
-    if os.path.exists(GARMIN_TOKEN_DIR):
-        try:
-            client = Garmin(tokenstore=GARMIN_TOKEN_DIR)
-            client.login()
-            return client
-        except Exception:
-            pass  # token expired, fall through to full login
-
-    # Full credential login
     try:
         client = Garmin(GARMIN_CONF['EMAIL'], GARMIN_CONF['PASSWORD'])
         client.login()
+        return client
     except Exception as e:
-        logging.error(f"Garmin login failed: {e}")
+        logging.error("Garmin login failed: %s", e)
         return None
-
-    # Save session so future calls skip the login endpoint.
-    # Requires garth: pip install garth --break-system-packages
-    # Also ensure garminconnect is up to date: pip install garminconnect --upgrade --break-system-packages
-    try:
-        os.makedirs(GARMIN_TOKEN_DIR, exist_ok=True)
-        g = getattr(client, 'garth', None)
-        if g is None:
-            raise AttributeError("client.garth not found — upgrade garminconnect")
-        # garth <0.4 uses .dump(), newer versions use .save()
-        if hasattr(g, 'dump'):
-            g.dump(GARMIN_TOKEN_DIR)
-        else:
-            g.save(GARMIN_TOKEN_DIR)
-        logging.info("Garmin session saved to %s", GARMIN_TOKEN_DIR)
-    except Exception as e:
-        logging.warning("Could not save Garmin session: %s", e)
-
-    return client
 
 
 def fetch_garmin_data():
@@ -471,18 +442,12 @@ def update_data_thread():
                     data_store.aqhi = max(1, round(aqhi))
             data_store.last_update['weather'] = now
 
-        garmin_interval = data_store.last_update.get('garmin_backoff', 900)
-        if ENABLE_GARMIN and now - data_store.last_update['garmin'] > garmin_interval:
+        if ENABLE_GARMIN and now - data_store.last_update['garmin'] > 14400:
             g_data = fetch_garmin_data()
             if g_data:
                 with data_store.lock:
                     data_store.garmin = g_data
                     data_store.needs_full_refresh = True
-                data_store.last_update['garmin_backoff'] = 900   # reset to normal
-            else:
-                # Back off for 1 hour on failure (likely 429 rate limit)
-                data_store.last_update['garmin_backoff'] = 3600
-                logging.warning("Garmin fetch failed — backing off for 1 hour")
             data_store.last_update['garmin'] = now
 
         if ENABLE_BAMBU:
