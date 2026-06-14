@@ -1028,19 +1028,18 @@ def main():
                     partial_refresh_count = 0
                 else:
                     partial_refresh_count += 1
-                    # Every 3 cycles (~90 s), push a white frame before content so all
-                    # pixels get a full white→target drive. Partial waveform is too weak
-                    # to keep static content crisp without this periodic reset.
-                    if partial_refresh_count % 3 == 0:
-                        logging.info("Partial Refresh (ghost-clear)")
-                        from PIL import Image as PILImage
-                        white_img = PILImage.new('1', (epd.width, epd.height), 255)
-                        white_buf = epd.getbuffer(white_img)
-                        epd.display_Partial(white_buf, 0, 0, epd.width, epd.height)
-                        del white_img, white_buf
+                    # Every 20 cycles (~10 min) do a proper full-waveform refresh.
+                    # Partial waveform is too weak to maintain contrast on static
+                    # content — only the full LUT fully drives pixels to white/black.
+                    if partial_refresh_count % 20 == 0:
+                        logging.info("Periodic full refresh (anti-ghost)")
+                        epd.init()
+                        epd.display(buf)
+                        time.sleep(2)
+                        epd.init_Part()
                     else:
                         logging.info("Partial Refresh")
-                    epd.display_Partial(buf, 0, 0, epd.width, epd.height)
+                        epd.display_Partial(buf, 0, 0, epd.width, epd.height)
 
                 signal.alarm(0)
                 del image
