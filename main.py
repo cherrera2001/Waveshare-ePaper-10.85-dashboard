@@ -970,6 +970,31 @@ def render_screen(epd, fonts):
 
 
 # --- MAIN LOOP ---
+def _sync_dtm1(epd, buf):
+    """Write content to DTM1 (Old Data) without triggering a display refresh.
+
+    epd.display() always sets DTM1=0xFF (white) so the full waveform sees
+    every pixel as changed and drives them all.  After init_Part() we need
+    DTM1 to reflect what is actually on screen, otherwise the very first
+    partial refresh treats every pixel as changed (white→content) and applies
+    the partial waveform to the whole panel — causing widespread drift.
+    With DTM1 synced to content, partial refreshes only drive pixels that
+    genuinely changed (the clock digits), leaving static content untouched.
+    """
+    half = epd.width // 16          # bytes per half-row  (85)
+    stride = half * 2               # bytes per full row  (170)
+    master = bytearray(half * epd.height)
+    slave  = bytearray(half * epd.height)
+    for row in range(epd.height):
+        base = row * stride
+        master[row * half:(row + 1) * half] = buf[base       : base + half]
+        slave [row * half:(row + 1) * half] = buf[base + half: base + stride]
+    epd.send_command_M(0x10)
+    epd.send_data2_M(master)
+    epd.send_command_S(0x10)
+    epd.send_data2_S(slave)
+
+
 def main():
     auth_claude()
     auth_antigravity()
@@ -1036,23 +1061,11 @@ def main():
                     epd.display(buf)
                     time.sleep(2)
                     epd.init_Part()
+                    _sync_dtm1(epd, buf)
                     last_full_refresh_day = now_dt.day
                 else:
-                    # Partial-refresh column 3 only (clock + progress bars).
-                    # Columns 1 & 2 (Garmin, weather) stay at their last full-refresh
-                    # state and never accumulate partial-waveform drift.
-                    # Col3 starts at x=936 (byte 117) — entirely on the Slave controller.
-                    row_stride   = epd.width // 8          # 170 bytes per full row
-                    col3_x_px    = (epd.width // 3) * 2 + 30  # 936
-                    col3_x_byte  = col3_x_px // 8          # 117
-                    col3_w_bytes = row_stride - col3_x_byte # 53
-                    col3_buf = bytearray(col3_w_bytes * epd.height)
-                    for row in range(epd.height):
-                        src = row * row_stride + col3_x_byte
-                        dst = row * col3_w_bytes
-                        col3_buf[dst:dst + col3_w_bytes] = buf[src:src + col3_w_bytes]
-                    logging.info("Partial Refresh (col3 clock region)")
-                    epd.display_Partial(bytes(col3_buf), col3_x_px, 0, epd.width, epd.height)
+                    logging.info("Partial Refresh")
+                    epd.display_Partial(buf, 0, 0, epd.width, epd.height)
 
                 signal.alarm(0)
                 del image
