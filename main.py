@@ -302,7 +302,7 @@ def update_data_thread():
         now = time.time()
 
         if now - data_store.last_update['weather'] > 600:
-            weather_url = f"{API_ENDPOINTS['weather']}?latitude={LOCATION_LAT}&longitude={LOCATION_LON}&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,wind_direction_10m,weather_code,is_day,uv_index&hourly=temperature_2m,precipitation_probability,weather_code,cloud_cover&timezone=auto&forecast_days=2"
+            weather_url = f"{API_ENDPOINTS['weather']}?latitude={LOCATION_LAT}&longitude={LOCATION_LON}&current=temperature_2m,wind_speed_10m,wind_direction_10m,weather_code,is_day,uv_index&hourly=temperature_2m,precipitation_probability,weather_code,cloud_cover&daily=sunrise,sunset&timezone=auto&forecast_days=2"
             aqi_url = f"{API_ENDPOINTS['aqi']}?latitude={LOCATION_LAT}&longitude={LOCATION_LON}&current=ozone,nitrogen_dioxide,pm2_5&timezone=auto"
             w_data = net.get_json(weather_url)
             a_data = net.get_json(aqi_url)
@@ -624,8 +624,9 @@ def render_screen(epd, fonts):
     if 'current' in weather:
         cur = weather['current']
         temp = cur.get('temperature_2m', 0)
-        hum = cur.get('relative_humidity_2m', 0)
-        pres = cur.get('surface_pressure', 0)
+        daily = weather.get('daily', {})
+        sunrise = daily.get('sunrise', [''])[0][11:16] if daily.get('sunrise') else '--:--'
+        sunset  = daily.get('sunset',  [''])[0][11:16] if daily.get('sunset')  else '--:--'
         w_code = cur.get('weather_code', 0)
         wind_dir = cur.get('wind_direction_10m', 0)
         wind_spd = cur.get('wind_speed_10m', 0)
@@ -655,8 +656,10 @@ def render_screen(epd, fonts):
         else:
             draw.text((uv_val_x, uv_val_y), uv_val_str, font=fonts['60'], fill=0)
 
-        draw.text((col2_x + 100, 95), f"Humidity: {hum}%", font=fonts['20'], fill=0)
-        draw.text((col2_x + 100, 120), f"Press: {pres} hPa", font=fonts['20'], fill=0)
+        draw_icon(draw, col2_x + 100, 93, "icon_sun", (22, 22))
+        draw.text((col2_x + 126, 95), f"Rise  {sunrise}", font=fonts['20'], fill=0)
+        draw_icon(draw, col2_x + 100, 118, "icon_moon", (22, 22))
+        draw.text((col2_x + 126, 120), f"Set    {sunset}", font=fonts['20'], fill=0)
 
         draw.line((col2_x, 140, col2_x + col_w - 40, 140), fill=0, width=2)
 
