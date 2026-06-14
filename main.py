@@ -737,7 +737,8 @@ def render_screen(epd, fonts):
             if idx < len(times):
                 off_x = col2_x + (i * 105)
                 draw.text((off_x + 10, 340), f"{times[idx].split('T')[1][:5]}", font=fonts['24'], fill=0)
-                draw_icon(draw, off_x + 15, 375, get_weather_icon(codes[idx], 1), (60, 60))
+                hour = int(times[idx].split('T')[1][:2])
+                draw_icon(draw, off_x + 15, 375, get_weather_icon(codes[idx], 6 <= hour <= 21), (60, 60))
                 f_temp = math.floor(temps[idx] + 0.5)
                 draw.text((off_x + 15, 440), f"{f_temp}°C", font=fonts['24'], fill=0)
 
