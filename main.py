@@ -310,15 +310,15 @@ def update_data_thread():
                 if w_data: data_store.weather = w_data
                 if a_data and 'current' in a_data:
                     cur = a_data['current']
-                    o3  = cur.get('ozone', 0) or 0
-                    no2 = cur.get('nitrogen_dioxide', 0) or 0
-                    pm25 = cur.get('pm2_5', 0) or 0
-                    # Canadian AQHI formula
-                    import math as _math
+                    # open-meteo gives O3 and NO2 in µg/m³; AQHI formula needs ppb
+                    # PM2.5 is already in µg/m³ (no conversion)
+                    o3_ppb  = (cur.get('ozone', 0) or 0) / 1.9957
+                    no2_ppb = (cur.get('nitrogen_dioxide', 0) or 0) / 1.9125
+                    pm25    = cur.get('pm2_5', 0) or 0
                     aqhi = (1000 / 10.4) * (
-                        (_math.exp(0.000537 * o3) - 1) +
-                        (_math.exp(0.000871 * no2) - 1) +
-                        (_math.exp(0.000487 * pm25) - 1)
+                        (math.exp(0.000537 * o3_ppb) - 1) +
+                        (math.exp(0.000871 * no2_ppb) - 1) +
+                        (math.exp(0.000487 * pm25) - 1)
                     )
                     data_store.aqhi = max(1, round(aqhi))
             data_store.last_update['weather'] = now
