@@ -45,15 +45,12 @@ LOG_FILE = os.path.join(BASE_DIR, 'dashboard.log')
 # ######################
 ENABLE_BAMBU = False
 ENABLE_ANTIGRAVITY = False
-ENABLE_CLAUDE = False
 ENABLE_CALENDAR = True  # Fetches an ICS URL and shows the next upcoming event
 
 # --- API ENDPOINTS ---
 API_ENDPOINTS = {
     'weather': 'https://api.open-meteo.com/v1/forecast',
     'aqi': 'https://air-quality-api.open-meteo.com/v1/air-quality',
-    'btc': 'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart',
-    'eth': 'https://api.coingecko.com/api/v3/coins/ethereum/market_chart',
 }
 
 # --- CONFIGURATION ---
@@ -167,12 +164,11 @@ class DataStore:
         self.claude = {'error': False, 'five_hour': {}, 'seven_day': {}}
         self.antigravity = {'error': False, 'models': []}
         self.sysload = {'cpu': 0, 'ram_free': 0, 'history': deque(maxlen=30)}
-        self.crypto = {'btc': 0, 'eth': 0, 'btc_hist': [], 'eth_hist': []}
         self.ping = {'current': 0, 'history': deque(maxlen=50)}
 
         self.last_update = {
             'weather': 0, 'printer': 0, 'calendar': 0,
-            'crypto': 0, 'sysload': 0, 'ping': 0,
+            'sysload': 0, 'ping': 0,
             'claude': 0, 'antigravity': 0
         }
 
@@ -232,17 +228,11 @@ def time_until(iso_str):
 # --- AUTH & FETCH THREADS ---
 
 def auth_claude():
-    global ENABLE_CLAUDE
-    if not ENABLE_CLAUDE: return
     try:
         import claude
-        success = claude.interactive_auth()
-        if not success:
-            ENABLE_CLAUDE = False
-            print("Claude widget is disabled.")
+        claude.interactive_auth()
     except ImportError:
-        print("claude.py not found. Claude widget disabled.")
-        ENABLE_CLAUDE = False
+        pass
 
 
 def auth_antigravity():
@@ -338,23 +328,24 @@ def update_data_thread():
                         data_store.printer['status'] = 'OFFLINE'
                 data_store.last_update['printer'] = now
         else:
-            if now - data_store.last_update['crypto'] > 600:
-                btc_url = f"{API_ENDPOINTS['btc']}?vs_currency=usd&days=7"
-                eth_url = f"{API_ENDPOINTS['eth']}?vs_currency=usd&days=7"
-                btc_data = net.get_json(btc_url)
-                eth_data = net.get_json(eth_url)
-                with data_store.lock:
-                    if btc_data:
-                        prices = [p[1] for p in btc_data.get('prices', [])]
-                        if prices:
-                            data_store.crypto['btc'] = int(prices[-1])
-                            data_store.crypto['btc_hist'] = prices[::len(prices) // 50][:50]
-                    if eth_data:
-                        prices = [p[1] for p in eth_data.get('prices', [])]
-                        if prices:
-                            data_store.crypto['eth'] = int(prices[-1])
-                            data_store.crypto['eth_hist'] = prices[::len(prices) // 50][:50]
-                data_store.last_update['crypto'] = now
+            if now - data_store.last_update['claude'] > 600:
+                try:
+                    subprocess.run([sys.executable, os.path.join(BASE_DIR, 'claude.py')], capture_output=True, timeout=30)
+                    usage_path = os.path.join(BASE_DIR, 'usage.json')
+                    if os.path.exists(usage_path):
+                        with open(usage_path, 'r') as f:
+                            usage_data = json.load(f)
+                        with data_store.lock:
+                            data_store.claude = usage_data
+                            data_store.claude['error'] = 'five_hour' not in usage_data
+                    else:
+                        with data_store.lock:
+                            data_store.claude['error'] = True
+                except Exception as e:
+                    logging.error(f"Claude update error: {e}")
+                    with data_store.lock:
+                        data_store.claude['error'] = True
+                data_store.last_update['claude'] = now
 
         if not ENABLE_ANTIGRAVITY:
             if now - data_store.last_update['ping'] > 20:
@@ -400,29 +391,6 @@ def update_data_thread():
             except Exception as e:
                 logging.error(f"Calendar fetch error: {e}")
             data_store.last_update['calendar'] = now
-
-        # Claude Data Fetching (Run external script every 10 min)
-        if ENABLE_CLAUDE and now - data_store.last_update['claude'] > 600:
-            try:
-                subprocess.run([sys.executable, os.path.join(BASE_DIR, 'claude.py')], capture_output=True, timeout=30)
-                usage_path = os.path.join(BASE_DIR, 'usage.json')
-                if os.path.exists(usage_path):
-                    with open(usage_path, 'r') as f:
-                        usage_data = json.load(f)
-                    with data_store.lock:
-                        data_store.claude = usage_data
-                        if "error" in usage_data and "five_hour" not in usage_data:
-                            data_store.claude['error'] = True
-                        else:
-                            data_store.claude['error'] = False
-                else:
-                    with data_store.lock:
-                        data_store.claude['error'] = True
-            except Exception as e:
-                logging.error(f"Claude update error: {e}")
-                with data_store.lock:
-                    data_store.claude['error'] = True
-            data_store.last_update['claude'] = now
 
         if ENABLE_ANTIGRAVITY and now - data_store.last_update['antigravity'] > 60:
             try:
@@ -511,7 +479,6 @@ def render_screen(epd, fonts):
         claude = data_store.claude.copy()
         antigravity = data_store.antigravity.copy()
         sysload = data_store.sysload.copy()
-        crypto = data_store.crypto.copy()
         ping = data_store.ping.copy()
     finally:
         data_store.lock.release()
@@ -545,13 +512,25 @@ def render_screen(epd, fonts):
                       f"{percent}% | Rem: {printer.get('remaining_time', '0')}m | {printer.get('layers', '0/0')} L",
                       font=fonts['20'], fill=0)
     else:
-        draw_icon(draw, col1_x, y2, "icon_btc", (50, 50))
-        draw.text((col1_x + 60, y2), f"BTC: ${crypto['btc']}", font=fonts['28'], fill=0)
-        draw_sparkline(draw, col1_x + 60, y2 + 35, crypto['btc_hist'], max_items=50, width=350, height=35, style="bar")
+        draw_icon(draw, col1_x, y2, "icon_cpu", (50, 50))
+        draw.text((col1_x + 60, y2), "CLAUDE USAGE", font=fonts['28'], fill=0)
+        if claude.get('error'):
+            draw.text((col1_x + 60, y2 + 40), "No data — auth required", font=fonts['20'], fill=0)
+        else:
+            pct_5h = claude.get('five_hour', {}).get('utilization', 0)
+            rem_5h = time_until(claude.get('five_hour', {}).get('resets_at'))
+            draw.text((col1_x + 60, y2 + 38), f"5h:  {pct_5h}%  (resets {rem_5h})", font=fonts['20'], fill=0)
+            bx, bw, bh = col1_x + 60, 340, 14
+            draw.rectangle((bx, y2 + 60, bx + bw, y2 + 60 + bh), outline=0, width=2)
+            fw = int((bw - 4) * min(pct_5h / 100.0, 1.0))
+            if fw > 0: draw.rectangle((bx + 2, y2 + 62, bx + 2 + fw, y2 + 60 + bh - 2), fill=0)
 
-        draw_icon(draw, col1_x, y2 + 80, "icon_eth", (50, 50))
-        draw.text((col1_x + 60, y2 + 80), f"ETH: ${crypto['eth']}", font=fonts['28'], fill=0)
-        draw_sparkline(draw, col1_x + 60, y2 + 115, crypto['eth_hist'], max_items=50, width=350, height=35, style="bar")
+            pct_7d = claude.get('seven_day', {}).get('utilization', 0)
+            rem_7d = time_until(claude.get('seven_day', {}).get('resets_at'))
+            draw.text((col1_x + 60, y2 + 85), f"7d:  {pct_7d}%  (resets {rem_7d})", font=fonts['20'], fill=0)
+            draw.rectangle((bx, y2 + 107, bx + bw, y2 + 107 + bh), outline=0, width=2)
+            fw = int((bw - 4) * min(pct_7d / 100.0, 1.0))
+            if fw > 0: draw.rectangle((bx + 2, y2 + 109, bx + 2 + fw, y2 + 107 + bh - 2), fill=0)
 
     draw.line((col1_x, 320, col_w - 20, 320), fill=0, width=2)
 
@@ -729,60 +708,33 @@ def render_screen(epd, fonts):
 
     draw.line((col3_x, 220, epd.width - 20, 220), fill=0, width=2)
 
-    # 2. Claude AI OR Time Progress
+    # 2. Time Progress
     sp_y = 240
     draw.rectangle((col3_x, sp_y, col3_x + 420, sp_y + 130), fill=255)
+    tp_y = sp_y
+    draw.text((col3_x, tp_y), "TIME PROGRESS", font=fonts['28'], fill=0)
 
-    if ENABLE_CLAUDE:
-        draw.text((col3_x, sp_y), "CLAUDE AI USAGE", font=fonts['28'], fill=0)
+    day_pct = (dt.hour * 3600 + dt.minute * 60 + dt.second) / 86400.0
+    days_in_m = calendar.monthrange(dt.year, dt.month)[1]
+    month_pct = (dt.day - 1 + (dt.hour / 24.0)) / days_in_m
+    days_in_y = 366 if calendar.isleap(dt.year) else 365
+    year_pct = (dt.timetuple().tm_yday - 1 + (dt.hour / 24.0)) / days_in_y
 
-        if claude.get('error'):
-            draw.text((col3_x, sp_y + 50), "Claude Usage Error", font=fonts['24'], fill=0)
-        else:
-            pct_5h = claude.get('five_hour', {}).get('utilization', 0)
-            resets_5h = claude.get('five_hour', {}).get('resets_at')
-            rem_5h = time_until(resets_5h)
+    def draw_prog(y_offset, label, pct):
+        draw.text((col3_x, tp_y + y_offset), label, font=fonts['24'], fill=0)
+        bx = col3_x + 110
+        bw = 200
+        bh = 20
+        draw.rectangle((bx, tp_y + y_offset + 2, bx + bw, tp_y + y_offset + bh + 2), outline=0, width=2)
+        if pct > 0:
+            fill_w = int((bw - 4) * min(pct, 1.0))
+            if fill_w > 0:
+                draw.rectangle((bx + 2, tp_y + y_offset + 4, bx + 2 + fill_w, tp_y + y_offset + bh), fill=0)
+        draw.text((bx + bw + 15, tp_y + y_offset), f"{int(pct * 100)}%", font=fonts['24'], fill=0)
 
-            draw.text((col3_x, sp_y + 40), f"5-Hour Limit: {pct_5h}% (Resets in {rem_5h})", font=fonts['20'], fill=0)
-            bx, bw, bh = col3_x, 400, 15
-            draw.rectangle((bx, sp_y + 65, bx + bw, sp_y + 65 + bh), outline=0, width=2)
-            fill_w = int((bw - 4) * min(pct_5h / 100.0, 1.0))
-            if fill_w > 0: draw.rectangle((bx + 2, sp_y + 67, bx + 2 + fill_w, sp_y + 65 + bh - 2), fill=0)
-
-            pct_7d = claude.get('seven_day', {}).get('utilization', 0)
-            resets_7d = claude.get('seven_day', {}).get('resets_at')
-            rem_7d = time_until(resets_7d)
-
-            draw.text((col3_x, sp_y + 90), f"7-Day Limit: {pct_7d}% (Resets in {rem_7d})", font=fonts['20'], fill=0)
-            draw.rectangle((bx, sp_y + 115, bx + bw, sp_y + 115 + bh), outline=0, width=2)
-            fill_w = int((bw - 4) * min(pct_7d / 100.0, 1.0))
-            if fill_w > 0: draw.rectangle((bx + 2, sp_y + 117, bx + 2 + fill_w, sp_y + 115 + bh - 2), fill=0)
-
-    else:
-        tp_y = sp_y
-        draw.text((col3_x, tp_y), "TIME PROGRESS", font=fonts['28'], fill=0)
-
-        day_pct = (dt.hour * 3600 + dt.minute * 60 + dt.second) / 86400.0
-        days_in_m = calendar.monthrange(dt.year, dt.month)[1]
-        month_pct = (dt.day - 1 + (dt.hour / 24.0)) / days_in_m
-        days_in_y = 366 if calendar.isleap(dt.year) else 365
-        year_pct = (dt.timetuple().tm_yday - 1 + (dt.hour / 24.0)) / days_in_y
-
-        def draw_prog(y_offset, label, pct):
-            draw.text((col3_x, tp_y + y_offset), label, font=fonts['24'], fill=0)
-            bx = col3_x + 110
-            bw = 200
-            bh = 20
-            draw.rectangle((bx, tp_y + y_offset + 2, bx + bw, tp_y + y_offset + bh + 2), outline=0, width=2)
-            if pct > 0:
-                fill_w = int((bw - 4) * min(pct, 1.0))
-                if fill_w > 0:
-                    draw.rectangle((bx + 2, tp_y + y_offset + 4, bx + 2 + fill_w, tp_y + y_offset + bh), fill=0)
-            draw.text((bx + bw + 15, tp_y + y_offset), f"{int(pct * 100)}%", font=fonts['24'], fill=0)
-
-        draw_prog(40, "DAY", day_pct)
-        draw_prog(75, "MONTH", month_pct)
-        draw_prog(110, "YEAR", year_pct)
+    draw_prog(40, "DAY", day_pct)
+    draw_prog(75, "MONTH", month_pct)
+    draw_prog(110, "YEAR", year_pct)
 
     draw.line((col3_x, 380, epd.width - 20, 380), fill=0, width=2)
 
@@ -860,7 +812,7 @@ def main():
                 image = render_screen(epd, fonts)
                 buf = epd.getbuffer(image)
 
-                if refresh_counter >= 600:
+                if refresh_counter >= 1200:
                     logging.info("Full Refresh cycle")
                     epd.init()
                     epd.display(buf)
@@ -875,7 +827,7 @@ def main():
                 signal.alarm(0)
                 del image
                 del buf
-                if refresh_counter % 10 == 0: gc.collect()
+                if refresh_counter % 20 == 0: gc.collect()
 
             except HardwareTimeoutError:
                 logging.critical("HARDWARE HANG DETECTED!")
@@ -891,7 +843,7 @@ def main():
                 logging.error(f"Unexpected error in main: {e}")
 
             elapsed = time.time() - start_time
-            sleep_time = max(5, 60 - elapsed)
+            sleep_time = max(2, 30 - elapsed)
             time.sleep(sleep_time)
 
     except KeyboardInterrupt:
