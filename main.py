@@ -862,7 +862,7 @@ def main():
                 image = render_screen(epd, fonts)
                 buf = epd.getbuffer(image)
 
-                if refresh_counter >= 1200:
+                if refresh_counter >= 120:  # full refresh every ~1 hour (120 × 30s)
                     logging.info("Full Refresh cycle")
                     epd.init()
                     epd.display(buf)
