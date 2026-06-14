@@ -1028,11 +1028,11 @@ def main():
                     partial_refresh_count = 0
                 else:
                     partial_refresh_count += 1
-                    # Every 20 cycles (~10 min) do a proper full-waveform refresh.
-                    # Partial waveform is too weak to maintain contrast on static
-                    # content — only the full LUT fully drives pixels to white/black.
-                    if partial_refresh_count % 20 == 0:
-                        logging.info("Periodic full refresh (anti-ghost)")
+                    # Full-waveform refresh every 4 cycles (~2 min). Partial waveform
+                    # only drives pixels that *changed* vs DTM1; static content (weather,
+                    # calendar, Garmin) gets no drive and drifts grey within a few cycles.
+                    if partial_refresh_count % 4 == 0:
+                        logging.info("Periodic full refresh (anti-ghost, cycle %d)", partial_refresh_count)
                         epd.init()
                         epd.display(buf)
                         time.sleep(2)
