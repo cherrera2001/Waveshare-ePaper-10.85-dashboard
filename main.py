@@ -12,21 +12,19 @@ import socket
 import resource
 import signal
 import json
-import asyncio
-import pickle
 import subprocess
 import math
 import calendar
-import urllib.parse
 from collections import deque
 from datetime import datetime, timezone
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageEnhance
 from logging.handlers import RotatingFileHandler
 
-# --- GMAIL IMPORTS ---
-from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
+try:
+    from icalendar import Calendar as iCalendar
+    HAS_ICALENDAR = True
+except ImportError:
+    HAS_ICALENDAR = False
 
 # --- SYSTEM LIMITS ---
 try:
@@ -45,23 +43,17 @@ LOG_FILE = os.path.join(BASE_DIR, 'dashboard.log')
 # ######################
 # --- WIDGET TOGGLES ---
 # ######################
-ENABLE_STRAVA = False
 ENABLE_BAMBU = False
-ENABLE_ROBOROCK = False
 ENABLE_ANTIGRAVITY = False
 ENABLE_CLAUDE = False
-ENABLE_SPOTIFY = False
+ENABLE_CALENDAR = True  # Fetches an ICS URL and shows the next upcoming event
 
 # --- API ENDPOINTS ---
 API_ENDPOINTS = {
     'weather': 'https://api.open-meteo.com/v1/forecast',
     'aqi': 'https://air-quality-api.open-meteo.com/v1/air-quality',
-    'strava_token': 'https://www.strava.com/oauth/token',
-    'strava_auth': 'https://www.strava.com/oauth/authorize',
-    'strava_activities': 'https://www.strava.com/api/v3/athlete/activities',
     'btc': 'https://api.coingecko.com/api/v3/coins/bitcoin/market_chart',
     'eth': 'https://api.coingecko.com/api/v3/coins/ethereum/market_chart',
-    'lastfm': 'http://ws.audioscrobbler.com/2.0/'
 }
 
 # --- CONFIGURATION ---
@@ -75,24 +67,8 @@ PRINTER_CONF = {
     'ACCESS_CODE': ''
 }
 
-ROBOROCK_CONF = {
-    'EMAIL': 'email...'
-}
-
-LASTFM_CONF = {
-    'API_KEY': '',
-    'USERNAME': ''
-}
-
-STRAVA_CONF = {
-    'TOKEN_FILE': os.path.join(BASE_DIR, 'strava_token.json')
-}
-
-# --- FILES & SCOPES ---
-GMAIL_TOKEN_PATH = os.path.join(BASE_DIR, 'token.json')
-ROBOROCK_TOKEN_FILE = os.path.join(BASE_DIR, 'roborock_session.pkl')
-ROBOROCK_STATS_FILE = os.path.join(BASE_DIR, 'roborock_stats.json')
-GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+# ICS calendar URL — paste any public or private ICS link (Google Calendar, iCloud, etc.)
+CALENDAR_ICS_URL = 'https://calendar.google.com/calendar/ical/your_calendar_id/basic.ics'
 
 if os.path.exists(LIB_DIR):
     sys.path.append(LIB_DIR)
@@ -100,16 +76,12 @@ if os.path.exists(LIB_DIR):
 try:
     from waveshare_epd import epd10in85
     import bambulabs_api as bl
-    from roborock.web_api import RoborockApiClient
-    from roborock.devices.device_manager import create_device_manager, UserParams
 except ImportError:
     pass
 
 # --- LOGGING ---
 logging.getLogger("bambulabs_api").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3").setLevel(logging.CRITICAL)
-logging.getLogger("roborock").setLevel(logging.CRITICAL)
-logging.getLogger("aiomqtt").setLevel(logging.CRITICAL)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -190,28 +162,17 @@ class DataStore:
         self.lock = threading.Lock()
         self.weather = {}
         self.aqi = 0
-        self.strava = {
-            'rides': 0, 'total_distance': 0,
-            'rides_curr': 0, 'distance_curr': 0,
-            'rides_prev': 0, 'distance_prev': 0,
-            'bike_total': 0, 'hike_total': 0
-        }
         self.printer = {'status': 'OFFLINE'}
-        self.gmail_unread = 0
-        self.spotify = {'status': 'PAUSED', 'text': '', 'cover': None}
+        self.calendar = {'title': '', 'start': None}  # next upcoming event
         self.claude = {'error': False, 'five_hour': {}, 'seven_day': {}}
         self.antigravity = {'error': False, 'models': []}
-        self.roborock = {
-            'status': 'OFFLINE', 'battery': 0, 'is_cleaning': False,
-            'current_area': 0.0, 'ref_area': 0.0, 'pct': 0.0, 'last_date': '-'
-        }
         self.sysload = {'cpu': 0, 'ram_free': 0, 'history': deque(maxlen=30)}
         self.crypto = {'btc': 0, 'eth': 0, 'btc_hist': [], 'eth_hist': []}
         self.ping = {'current': 0, 'history': deque(maxlen=50)}
 
         self.last_update = {
-            'weather': 0, 'strava': 0, 'printer': 0, 'gmail': 0,
-            'spotify': 0, 'crypto': 0, 'sysload': 0, 'ping': 0,
+            'weather': 0, 'printer': 0, 'calendar': 0,
+            'crypto': 0, 'sysload': 0, 'ping': 0,
             'claude': 0, 'antigravity': 0
         }
 
@@ -298,239 +259,6 @@ def auth_antigravity():
         ENABLE_ANTIGRAVITY = False
 
 
-def auth_strava():
-    global ENABLE_STRAVA
-    if not ENABLE_STRAVA: return
-
-    if os.path.exists(STRAVA_CONF['TOKEN_FILE']):
-        return
-
-    print("\n--- STRAVA CONFIGURATION REQUIRED ---")
-    c_id = input("Enter Strava Client ID (or press Enter to disable): ").strip()
-    if not c_id:
-        print("Strava is disabled. Fallback widget (System Load) will be used.\n")
-        ENABLE_STRAVA = False
-        return
-
-    c_secret = input("Enter Strava Client Secret: ").strip()
-
-    auth_url = (
-        f"{API_ENDPOINTS['strava_auth']}?"
-        f"client_id={c_id}&"
-        f"response_type=code&"
-        f"redirect_uri=http://localhost&"
-        f"approval_prompt=force&"
-        f"scope=activity:read_all"
-    )
-
-    print("\n[!] To get a token with the correct permissions, open this link in your browser:\n")
-    print(f"--> {auth_url} <--\n")
-    print("Click 'Authorize'. You will be redirected to an empty/error page (localhost).")
-    print("Look at the address bar. Copy the 'code' parameter.")
-
-    code_input = input("Enter the 'code' from the URL (or paste the full URL): ").strip()
-
-    if not code_input:
-        print("Authorization cancelled. Strava is disabled.\n")
-        ENABLE_STRAVA = False
-        return
-
-    if 'code=' in code_input:
-        try:
-            parsed = urllib.parse.urlparse(code_input)
-            params = urllib.parse.parse_qs(parsed.query)
-            code = params.get('code', [code_input])[0]
-        except:
-            code = code_input.split('code=')[1].split('&')[0]
-    else:
-        code = code_input
-
-    print("Fetching Access Token...")
-    data = {'client_id': c_id, 'client_secret': c_secret, 'code': code, 'grant_type': 'authorization_code'}
-
-    try:
-        resp = requests.post(API_ENDPOINTS['strava_token'], data=data)
-        resp.raise_for_status()
-        token_data = resp.json()
-        token_data['client_id'] = c_id
-        token_data['client_secret'] = c_secret
-
-        with open(STRAVA_CONF['TOKEN_FILE'], 'w') as f:
-            json.dump(token_data, f, indent=4)
-        print("Strava Authorization Successful!\n")
-    except Exception as e:
-        print(f"Failed to fetch Strava tokens: {e}")
-        ENABLE_STRAVA = False
-
-
-def fetch_strava_data():
-    if not os.path.exists(STRAVA_CONF['TOKEN_FILE']): return None
-    with open(STRAVA_CONF['TOKEN_FILE'], 'r') as f:
-        token_data = json.load(f)
-
-    c_id = token_data.get('client_id')
-    c_secret = token_data.get('client_secret')
-
-    if time.time() > token_data.get('expires_at', 0):
-        data = {'client_id': c_id, 'client_secret': c_secret, 'grant_type': 'refresh_token',
-                'refresh_token': token_data.get('refresh_token')}
-        new_token = net.get_json(API_ENDPOINTS['strava_token'], data=data, method='POST')
-        if new_token and 'access_token' in new_token:
-            new_token['client_id'] = c_id
-            new_token['client_secret'] = c_secret
-            token_data = new_token
-            with open(STRAVA_CONF['TOKEN_FILE'], 'w') as f:
-                json.dump(token_data, f, indent=4)
-        else:
-            return None
-
-    access_token = token_data['access_token']
-
-    now_year = datetime.now().year
-    start_curr_ts = datetime(now_year, 1, 1).timestamp()
-    start_prev_ts = datetime(now_year - 1, 1, 1).timestamp()
-    end_prev_ts = datetime(now_year - 1, 12, 31, 23, 59, 59).timestamp()
-
-    page = 1
-    total_rides, total_dist = 0, 0
-    rides_curr, dist_curr = 0, 0
-    rides_prev, dist_prev = 0, 0
-    bike_total, hike_total = 0, 0
-
-    headers = {"Authorization": f"Bearer {access_token}"}
-
-    while True:
-        url = f"{API_ENDPOINTS['strava_activities']}?page={page}&per_page=100"
-        activities = net.get_json(url, headers=headers)
-        if not activities: break
-
-        for act in activities:
-            t = act.get('type')
-            d = act.get('distance', 0)
-            act_time = datetime.strptime(act['start_date'], "%Y-%m-%dT%H:%M:%SZ").timestamp()
-
-            if t in ['Ride', 'VirtualRide', 'EBikeRide', 'GravelRide', 'MountainBikeRide']:
-                total_rides += 1
-                total_dist += d
-                bike_total += d
-                if act_time >= start_curr_ts:
-                    rides_curr += 1
-                    dist_curr += d
-                elif start_prev_ts <= act_time <= end_prev_ts:
-                    rides_prev += 1
-                    dist_prev += d
-            elif t in ['Hike', 'Walk']:
-                hike_total += d
-
-        if len(activities) < 100: break
-        page += 1
-
-    return {
-        "rides": total_rides,
-        "total_distance": round(total_dist / 1000, 1),
-        "rides_curr": rides_curr,
-        "distance_curr": round(dist_curr / 1000, 1),
-        "rides_prev": rides_prev,
-        "distance_prev": round(dist_prev / 1000, 1),
-        "bike_total": round(bike_total / 1000, 1),
-        "hike_total": round(hike_total / 1000, 1)
-    }
-
-
-def auth_roborock(email):
-    global ENABLE_ROBOROCK
-    if not ENABLE_ROBOROCK: return None
-
-    if os.path.exists(ROBOROCK_TOKEN_FILE):
-        try:
-            with open(ROBOROCK_TOKEN_FILE, "rb") as f:
-                return pickle.load(f)
-        except:
-            pass
-
-    print("\n--- ROBOROCK AUTHORIZATION REQUIRED ---")
-
-    async def _do_auth():
-        web_api = RoborockApiClient(username=email)
-        await web_api.request_code()
-        code = input(f"Enter 6-digit Roborock auth code sent to {email} (or press Enter to disable): ").strip()
-        if not code: return None
-        user_data = await web_api.code_login(code)
-        with open(ROBOROCK_TOKEN_FILE, "wb") as f: pickle.dump(user_data, f)
-        print("Roborock Authorization Successful!\n")
-        return user_data
-
-    if sys.platform == "win32": asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
-    try:
-        user_data = asyncio.run(_do_auth())
-        if not user_data:
-            print("Roborock is disabled. Fallback widget (Ping) will be used.\n")
-            ENABLE_ROBOROCK = False
-        return user_data
-    except Exception as e:
-        print(f"Failed to auth Roborock: {e}")
-        ENABLE_ROBOROCK = False
-        return None
-
-
-def roborock_update_thread(user_data, email):
-    if not ENABLE_ROBOROCK or not user_data: return
-
-    async def _loop():
-        ref_area, last_date = 0.0, "-"
-        if os.path.exists(ROBOROCK_STATS_FILE):
-            try:
-                with open(ROBOROCK_STATS_FILE, "r") as f:
-                    stats = json.load(f)
-                    ref_area, last_date = stats.get("ref_area", 0.0), stats.get("last_date", "-")
-            except:
-                pass
-
-        user_params = UserParams(username=email, user_data=user_data)
-        device_manager = await create_device_manager(user_params)
-
-        short_states = {
-            5: "Clean", 6: "Return", 8: "Charge", 10: "Pause",
-            17: "Spot", 18: "Room", 22: "Empty", 23: "Wash",
-            26: "ToWash", 29: "Map"
-        }
-
-        while True:
-            try:
-                devices = await device_manager.get_devices()
-                if devices and devices[0].v1_properties:
-                    device = devices[0]
-                    status_trait = device.v1_properties.status
-                    await status_trait.refresh()
-                    current_area = (status_trait.clean_area / 1000000) if status_trait.clean_area else 0
-
-                    is_cleaning = status_trait.state in [5, 6, 10, 17, 18, 22, 23, 26, 29]
-                    status_str = short_states.get(status_trait.state, f"S:{status_trait.state}")
-
-                    if not is_cleaning and current_area > 0 and current_area != ref_area:
-                        ref_area = current_area
-                        last_date = datetime.now().strftime("%d %b %H:%M")
-                        with open(ROBOROCK_STATS_FILE, "w") as f: json.dump(
-                            {"ref_area": ref_area, "last_date": last_date}, f)
-
-                    pct = (current_area / ref_area) * 100 if is_cleaning and ref_area > 0 else 0.0
-
-                    with data_store.lock:
-                        data_store.roborock = {
-                            'status': status_str, 'battery': status_trait.battery,
-                            'is_cleaning': is_cleaning, 'current_area': current_area,
-                            'ref_area': ref_area, 'pct': pct, 'last_date': last_date
-                        }
-            except Exception as e:
-                logging.error(f"Roborock error: {e}")
-            await asyncio.sleep(60)
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(_loop())
-
-
 def update_data_thread():
     global global_printer
 
@@ -556,27 +284,20 @@ def update_data_thread():
                 if a_data and 'current' in a_data: data_store.aqi = a_data['current'].get('european_aqi', 0)
             data_store.last_update['weather'] = now
 
-        if ENABLE_STRAVA:
-            if now - data_store.last_update['strava'] > 900:
-                s_data = fetch_strava_data()
-                if s_data:
-                    with data_store.lock: data_store.strava = s_data
-                data_store.last_update['strava'] = now
-        else:
-            if now - data_store.last_update['sysload'] > 30:
-                try:
-                    with open('/proc/loadavg', 'r') as f:
-                        cpu = float(f.read().split()[0]) * 10
-                    with open('/proc/meminfo', 'r') as f:
-                        lines = f.readlines()
-                        free = int(lines[1].split()[1]) // 1024
-                    with data_store.lock:
-                        data_store.sysload['cpu'] = min(int(cpu), 100)
-                        data_store.sysload['ram_free'] = free
-                        data_store.sysload['history'].append(min(int(cpu), 100))
-                except:
-                    pass
-                data_store.last_update['sysload'] = now
+        if now - data_store.last_update['sysload'] > 30:
+            try:
+                with open('/proc/loadavg', 'r') as f:
+                    cpu = float(f.read().split()[0]) * 10
+                with open('/proc/meminfo', 'r') as f:
+                    lines = f.readlines()
+                    free = int(lines[1].split()[1]) // 1024
+                with data_store.lock:
+                    data_store.sysload['cpu'] = min(int(cpu), 100)
+                    data_store.sysload['ram_free'] = free
+                    data_store.sysload['history'].append(min(int(cpu), 100))
+            except:
+                pass
+            data_store.last_update['sysload'] = now
 
         if ENABLE_BAMBU:
             update_interval = 5 if is_connected else 15
@@ -635,7 +356,7 @@ def update_data_thread():
                             data_store.crypto['eth_hist'] = prices[::len(prices) // 50][:50]
                 data_store.last_update['crypto'] = now
 
-        if not ENABLE_ROBOROCK and not ENABLE_ANTIGRAVITY:
+        if not ENABLE_ANTIGRAVITY:
             if now - data_store.last_update['ping'] > 20:
                 try:
                     out = subprocess.check_output(['ping', '-c', '1', '-W', '1', '8.8.8.8']).decode('utf-8')
@@ -647,21 +368,38 @@ def update_data_thread():
                     data_store.ping['history'].append(int(ms))
                 data_store.last_update['ping'] = now
 
-        if now - data_store.last_update['gmail'] > 300:
+        if ENABLE_CALENDAR and HAS_ICALENDAR and now - data_store.last_update['calendar'] > 900:
             try:
-                creds = None
-                if os.path.exists(GMAIL_TOKEN_PATH):
-                    creds = Credentials.from_authorized_user_file(GMAIL_TOKEN_PATH, GMAIL_SCOPES)
-                    if creds and creds.expired and creds.refresh_token:
-                        creds.refresh(Request())
-                        with open(GMAIL_TOKEN_PATH, 'w') as t: t.write(creds.to_json())
-                if creds and creds.valid:
-                    service = build('gmail', 'v1', credentials=creds, cache_discovery=False)
-                    label_info = service.users().labels().get(userId='me', id='INBOX').execute()
-                    with data_store.lock: data_store.gmail_unread = label_info.get('messagesUnread', 0)
-            except:
-                pass
-            data_store.last_update['gmail'] = now
+                resp = net.session.get(CALENDAR_ICS_URL, timeout=10)
+                resp.raise_for_status()
+                cal = iCalendar.from_ical(resp.content)
+                now_dt = datetime.now(timezone.utc)
+                next_event = None
+                for component in cal.walk():
+                    if component.name != 'VEVENT':
+                        continue
+                    dtstart = component.get('DTSTART')
+                    if dtstart is None:
+                        continue
+                    start = dtstart.dt
+                    # Normalize date-only events to midnight UTC
+                    if not hasattr(start, 'tzinfo'):
+                        from datetime import date
+                        start = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
+                    elif start.tzinfo is None:
+                        start = start.replace(tzinfo=timezone.utc)
+                    if start >= now_dt:
+                        if next_event is None or start < next_event[1]:
+                            summary = str(component.get('SUMMARY', 'No title'))
+                            next_event = (summary, start)
+                with data_store.lock:
+                    if next_event:
+                        data_store.calendar = {'title': next_event[0], 'start': next_event[1]}
+                    else:
+                        data_store.calendar = {'title': 'No upcoming events', 'start': None}
+            except Exception as e:
+                logging.error(f"Calendar fetch error: {e}")
+            data_store.last_update['calendar'] = now
 
         # Claude Data Fetching (Run external script every 10 min)
         if ENABLE_CLAUDE and now - data_store.last_update['claude'] > 600:
@@ -707,40 +445,6 @@ def update_data_thread():
                 with data_store.lock:
                     data_store.antigravity['error'] = True
             data_store.last_update['antigravity'] = now
-
-        if ENABLE_SPOTIFY and now - data_store.last_update['spotify'] > 20:
-            url = f"{API_ENDPOINTS['lastfm']}?method=user.getrecenttracks&user={LASTFM_CONF['USERNAME']}&api_key={LASTFM_CONF['API_KEY']}&format=json&limit=2&rnd={int(now)}"
-            s_data = net.get_json(url, timeout=5)
-            if s_data:
-                try:
-                    tracks = s_data.get('recenttracks', {}).get('track', [])
-                    if isinstance(tracks, dict): tracks = [tracks]
-                    if tracks:
-                        current_track = tracks[0]
-                        is_playing = current_track.get('@attr', {}).get('nowplaying') == 'true'
-                        if is_playing:
-                            track_name = current_track.get('name', 'Unknown')
-                            artist = current_track.get('artist', {}).get('#text', 'Unknown')
-                            img_url = ""
-                            for img in current_track.get('image', []):
-                                if img.get('size') == 'extralarge': img_url = img.get('#text', '')
-                            cover_dithered = None
-                            if img_url:
-                                img_bytes = net.get_image(img_url)
-                                if img_bytes:
-                                    img_pil = Image.open(io.BytesIO(img_bytes)).convert("L").resize((120, 120))
-                                    enhancer = ImageEnhance.Contrast(img_pil)
-                                    img_pil = enhancer.enhance(3.0)
-                                    cover_dithered = img_pil.convert("1", dither=Image.NONE)
-                            with data_store.lock:
-                                data_store.spotify = {'status': 'PLAYING', 'text': f"{artist} - {track_name}",
-                                                      'cover': cover_dithered}
-                        else:
-                            with data_store.lock:
-                                data_store.spotify = {'status': 'PAUSED', 'text': '', 'cover': None}
-                except:
-                    pass
-            data_store.last_update['spotify'] = now
 
         gc.collect()
         time.sleep(1)
@@ -802,11 +506,8 @@ def render_screen(epd, fonts):
     try:
         weather = data_store.weather.copy()
         aqi = data_store.aqi
-        strava = data_store.strava.copy()
         printer = data_store.printer.copy()
-        rob = data_store.roborock.copy()
-        gmail_unread = data_store.gmail_unread
-        spotify = data_store.spotify.copy()
+        cal_event = data_store.calendar.copy()
         claude = data_store.claude.copy()
         antigravity = data_store.antigravity.copy()
         sysload = data_store.sysload.copy()
@@ -820,32 +521,13 @@ def render_screen(epd, fonts):
     # --- COLUMN 1 (Widgets) ---
     col1_x = 20
 
-    # Widget 1: Strava or SysLoad
+    # Widget 1: System Load
     y1 = 20
-    if ENABLE_STRAVA:
-        draw_icon(draw, col1_x, y1, "icon_strava", (60, 60))
-        draw.text((col1_x + 70, y1), "STRAVA STATS", font=fonts['28'], fill=0)
-
-        now_y = datetime.now().year
-        draw.text((col1_x + 70, y1 + 35),
-                  f"{now_y}: {strava.get('distance_curr', 0)} km | {now_y - 1}: {strava.get('distance_prev', 0)} km",
-                  font=fonts['20'], fill=0)
-        draw.text((col1_x + 70, y1 + 60),
-                  f"Total: {strava.get('total_distance', 0)} km | {strava.get('rides', 0)} acts", font=fonts['20'],
-                  fill=0)
-
-        draw_icon(draw, col1_x + 70, y1 + 85, "icon_bike", (30, 30))
-        draw.text((col1_x + 105, y1 + 90), f"{strava.get('bike_total', 0)} km", font=fonts['20'], fill=0)
-
-        draw_icon(draw, col1_x + 220, y1 + 85, "icon_hike", (30, 30))
-        draw.text((col1_x + 255, y1 + 90), f"{strava.get('hike_total', 0)} km", font=fonts['20'], fill=0)
-
-    else:
-        draw_icon(draw, col1_x, y1, "icon_cpu", (50, 50))
-        draw.text((col1_x + 60, y1), f"SYSTEM LOAD: {sysload['cpu']}%", font=fonts['28'], fill=0)
-        draw.text((col1_x + 60, y1 + 35), f"RAM Free: {sysload['ram_free']} MB", font=fonts['20'], fill=0)
-        draw_sparkline(draw, col1_x + 60, y1 + 60, list(sysload['history']), max_items=30, width=350, height=40,
-                       style="bar")
+    draw_icon(draw, col1_x, y1, "icon_cpu", (50, 50))
+    draw.text((col1_x + 60, y1), f"SYSTEM LOAD: {sysload['cpu']}%", font=fonts['28'], fill=0)
+    draw.text((col1_x + 60, y1 + 35), f"RAM Free: {sysload['ram_free']} MB", font=fonts['20'], fill=0)
+    draw_sparkline(draw, col1_x + 60, y1 + 60, list(sysload['history']), max_items=30, width=350, height=40,
+                   style="bar")
 
     draw.line((col1_x, 150, col_w - 20, 150), fill=0, width=2)
 
@@ -873,21 +555,9 @@ def render_screen(epd, fonts):
 
     draw.line((col1_x, 320, col_w - 20, 320), fill=0, width=2)
 
-    # Widget 3: Roborock or Ping
+    # Widget 3: Antigravity or Ping
     y3 = 340
-    if ENABLE_ROBOROCK:
-        draw_icon(draw, col1_x, y3, "icon_roborock", (50, 50))
-        draw.text((col1_x + 60, y3), f"Bat: {rob['battery']}% | {rob['status']}", font=fonts['28'], fill=0)
-        if rob['is_cleaning']:
-            draw.text((col1_x + 60, y3 + 35), f"Clean: {rob['current_area']:.1f} m2 ({rob['pct']:.0f}%)",
-                      font=fonts['24'], fill=0)
-            clamped_pct = min(rob['pct'], 100)
-            draw.rectangle((col1_x + 60, y3 + 70, col1_x + 390, y3 + 90), outline=0)
-            draw.rectangle((col1_x + 60, y3 + 70, col1_x + 60 + int(330 * (clamped_pct / 100)), y3 + 90), fill=0)
-        else:
-            draw.text((col1_x + 60, y3 + 35), f"Last: {rob['last_date']} | {rob['ref_area']:.1f} m2", font=fonts['24'],
-                      fill=0)
-    elif ENABLE_ANTIGRAVITY:
+    if ENABLE_ANTIGRAVITY:
         draw_icon(draw, col1_x, y3, "icon_cpu", (50, 50))
         draw.text((col1_x + 60, y3), "ANTIGRAVITY USAGE", font=fonts['28'], fill=0)
         
@@ -1059,9 +729,8 @@ def render_screen(epd, fonts):
 
     draw.line((col3_x, 220, epd.width - 20, 220), fill=0, width=2)
 
-    # 2. Claude AI OR Spotify OR Time Progress
+    # 2. Claude AI OR Time Progress
     sp_y = 240
-    # Clear background for widget
     draw.rectangle((col3_x, sp_y, col3_x + 420, sp_y + 130), fill=255)
 
     if ENABLE_CLAUDE:
@@ -1070,7 +739,6 @@ def render_screen(epd, fonts):
         if claude.get('error'):
             draw.text((col3_x, sp_y + 50), "Claude Usage Error", font=fonts['24'], fill=0)
         else:
-            # 5-Hour Limit
             pct_5h = claude.get('five_hour', {}).get('utilization', 0)
             resets_5h = claude.get('five_hour', {}).get('resets_at')
             rem_5h = time_until(resets_5h)
@@ -1081,7 +749,6 @@ def render_screen(epd, fonts):
             fill_w = int((bw - 4) * min(pct_5h / 100.0, 1.0))
             if fill_w > 0: draw.rectangle((bx + 2, sp_y + 67, bx + 2 + fill_w, sp_y + 65 + bh - 2), fill=0)
 
-            # 7-Day Limit
             pct_7d = claude.get('seven_day', {}).get('utilization', 0)
             resets_7d = claude.get('seven_day', {}).get('resets_at')
             rem_7d = time_until(resets_7d)
@@ -1091,24 +758,7 @@ def render_screen(epd, fonts):
             fill_w = int((bw - 4) * min(pct_7d / 100.0, 1.0))
             if fill_w > 0: draw.rectangle((bx + 2, sp_y + 117, bx + 2 + fill_w, sp_y + 115 + bh - 2), fill=0)
 
-    elif ENABLE_SPOTIFY:
-        if spotify['cover']:
-            Himage.paste(spotify['cover'], (col3_x, sp_y))
-        else:
-            draw_icon(draw, col3_x, sp_y, "icon_spotify", (120, 120))
-
-        status_ico = "icon_play" if spotify['status'] == 'PLAYING' else "icon_pause"
-        draw_icon(draw, col3_x + 140, sp_y + 10, status_ico, (30, 30))
-
-        if spotify['status'] == 'PLAYING':
-            words = spotify['text'].split(' - ')
-            artist = words[0] if len(words) > 0 else "Unknown"
-            track = words[1] if len(words) > 1 else ""
-            draw.text((col3_x + 180, sp_y + 10), artist[:20], font=fonts['28'], fill=0)
-            draw.text((col3_x + 140, sp_y + 50), track[:25], font=fonts['24'], fill=0)
-
     else:
-        # Fallback: Time Progress
         tp_y = sp_y
         draw.text((col3_x, tp_y), "TIME PROGRESS", font=fonts['28'], fill=0)
 
@@ -1136,20 +786,41 @@ def render_screen(epd, fonts):
 
     draw.line((col3_x, 380, epd.width - 20, 380), fill=0, width=2)
 
-    # 3. Gmail
-    gm_y = 400
-    draw_icon(draw, col3_x, gm_y, "icon_mail", (60, 60))
-    draw.text((col3_x + 80, gm_y + 10), f"Unread Inbox: {gmail_unread}", font=fonts['35'], fill=0)
+    # 3. Calendar
+    cal_y = 395
+    draw_icon(draw, col3_x, cal_y, "icon_mail", (50, 50))
+    draw.text((col3_x + 60, cal_y), "NEXT EVENT", font=fonts['24'], fill=0)
+    if ENABLE_CALENDAR and cal_event.get('title'):
+        title = cal_event['title']
+        start = cal_event.get('start')
+        # Truncate long titles to fit the column
+        max_chars = 22
+        display_title = title if len(title) <= max_chars else title[:max_chars - 1] + '…'
+        draw.text((col3_x + 60, cal_y + 28), display_title, font=fonts['28'], fill=0)
+        if start:
+            local_start = start.astimezone().replace(tzinfo=None)
+            now_local = datetime.now()
+            diff = local_start - now_local
+            days = diff.days
+            hours = diff.seconds // 3600
+            if days > 0:
+                when = f"In {days}d {hours}h  —  {local_start.strftime('%a %d %b')}"
+            elif diff.total_seconds() > 0:
+                mins = (diff.seconds % 3600) // 60
+                when = f"In {hours}h {mins}m  —  {local_start.strftime('%H:%M')}"
+            else:
+                when = local_start.strftime('%a %d %b  %H:%M')
+            draw.text((col3_x + 60, cal_y + 58), when, font=fonts['20'], fill=0)
+    else:
+        draw.text((col3_x + 60, cal_y + 28), "No events / disabled", font=fonts['24'], fill=0)
 
     return Himage
 
 
 # --- MAIN LOOP ---
 def main():
-    auth_strava()
     auth_claude()
     auth_antigravity()
-    roborock_user_data = auth_roborock(ROBOROCK_CONF['EMAIL'])
 
     signal.signal(signal.SIGALRM, timeout_handler)
     epd = None
@@ -1179,11 +850,6 @@ def main():
         t_data = threading.Thread(target=update_data_thread)
         t_data.daemon = True
         t_data.start()
-
-        if ENABLE_ROBOROCK:
-            t_robo = threading.Thread(target=roborock_update_thread, args=(roborock_user_data, ROBOROCK_CONF['EMAIL']))
-            t_robo.daemon = True
-            t_robo.start()
 
         refresh_counter = 0
 
