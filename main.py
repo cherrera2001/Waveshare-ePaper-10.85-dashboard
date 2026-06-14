@@ -314,20 +314,29 @@ def _garmin_client():
         logging.error("garminconnect not installed: pip install garminconnect --break-system-packages")
         return None
 
-    client = Garmin(GARMIN_CONF['EMAIL'], GARMIN_CONF['PASSWORD'])
+    # Try loading a saved session first (avoids hitting Garmin's login endpoint)
     if os.path.exists(GARMIN_TOKEN_DIR):
         try:
-            client.login(GARMIN_TOKEN_DIR)
+            client = Garmin(tokenstore=GARMIN_TOKEN_DIR)
+            client.login()
             return client
         except Exception:
             pass  # token expired, fall through to full login
 
+    # Full credential login
     try:
+        client = Garmin(GARMIN_CONF['EMAIL'], GARMIN_CONF['PASSWORD'])
         client.login()
-        client.garth.dump(GARMIN_TOKEN_DIR)
     except Exception as e:
         logging.error(f"Garmin login failed: {e}")
         return None
+
+    # Save session so future calls skip the login endpoint
+    try:
+        os.makedirs(GARMIN_TOKEN_DIR, exist_ok=True)
+        client.garth.dump(GARMIN_TOKEN_DIR)
+    except Exception as e:
+        logging.warning(f"Could not save Garmin session: {e}")
 
     return client
 
