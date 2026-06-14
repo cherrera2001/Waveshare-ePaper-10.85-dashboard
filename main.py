@@ -67,6 +67,17 @@ PRINTER_CONF = {
 # ICS calendar URL — paste any public or private ICS link (Google Calendar, iCloud, etc.)
 CALENDAR_ICS_URL = 'https://calendar.google.com/calendar/ical/your_calendar_id/basic.ics'
 
+# --- LOCAL CONFIG OVERRIDE ---
+# Copy config.example.py to config.py and set your values there.
+# config.py is gitignored so git pull will never overwrite it.
+try:
+    import config as _cfg
+    for _k, _v in vars(_cfg).items():
+        if not _k.startswith('_'):
+            globals()[_k] = _v
+except ImportError:
+    pass
+
 if os.path.exists(LIB_DIR):
     sys.path.append(LIB_DIR)
 
@@ -92,6 +103,32 @@ file_handler.setFormatter(formatter)
 logger.handlers.clear()
 logger.addHandler(console_handler)
 logger.addHandler(file_handler)
+
+
+def _ensure_calendar_icon():
+    path = os.path.join(ICON_DIR, 'icon_calendar.bmp')
+    if os.path.exists(path):
+        return
+    try:
+        S = 60
+        img = Image.new('1', (S, S), 1)
+        d = ImageDraw.Draw(img)
+        d.rectangle([2, 6, S-3, S-3], outline=0, width=2)
+        d.rectangle([2, 6, S-3, 18], fill=0)
+        for tx in [14, 44]:
+            d.rectangle([tx-4, 2, tx+4, 10], fill=0)
+        cw = (S - 6) // 3
+        ch = (S - 22) // 3
+        for row in range(3):
+            for col in range(3):
+                cx = 3 + col * cw + 2
+                cy = 20 + row * ch + 2
+                d.rectangle([cx, cy, cx + cw - 4, cy + ch - 3], outline=0, width=1)
+        img.save(path)
+    except Exception as e:
+        logging.warning(f"Could not generate calendar icon: {e}")
+
+_ensure_calendar_icon()
 
 icon_cache = {}
 global_printer = None
@@ -158,7 +195,7 @@ class DataStore:
     def __init__(self):
         self.lock = threading.Lock()
         self.weather = {}
-        self.aqi = 0
+        self.aqhi = 0
         self.printer = {'status': 'OFFLINE'}
         self.calendar = {'title': '', 'start': None}  # next upcoming event
         self.claude = {'error': False, 'five_hour': {}, 'seven_day': {}}
@@ -266,12 +303,24 @@ def update_data_thread():
 
         if now - data_store.last_update['weather'] > 600:
             weather_url = f"{API_ENDPOINTS['weather']}?latitude={LOCATION_LAT}&longitude={LOCATION_LON}&current=temperature_2m,relative_humidity_2m,surface_pressure,wind_speed_10m,wind_direction_10m,weather_code,is_day,uv_index&hourly=temperature_2m,precipitation_probability,weather_code,cloud_cover&timezone=auto&forecast_days=2"
-            aqi_url = f"{API_ENDPOINTS['aqi']}?latitude={LOCATION_LAT}&longitude={LOCATION_LON}&current=european_aqi&timezone=auto"
+            aqi_url = f"{API_ENDPOINTS['aqi']}?latitude={LOCATION_LAT}&longitude={LOCATION_LON}&current=ozone,nitrogen_dioxide,pm2_5&timezone=auto"
             w_data = net.get_json(weather_url)
             a_data = net.get_json(aqi_url)
             with data_store.lock:
                 if w_data: data_store.weather = w_data
-                if a_data and 'current' in a_data: data_store.aqi = a_data['current'].get('european_aqi', 0)
+                if a_data and 'current' in a_data:
+                    cur = a_data['current']
+                    o3  = cur.get('ozone', 0) or 0
+                    no2 = cur.get('nitrogen_dioxide', 0) or 0
+                    pm25 = cur.get('pm2_5', 0) or 0
+                    # Canadian AQHI formula
+                    import math as _math
+                    aqhi = (1000 / 10.4) * (
+                        (_math.exp(0.000537 * o3) - 1) +
+                        (_math.exp(0.000871 * no2) - 1) +
+                        (_math.exp(0.000487 * pm25) - 1)
+                    )
+                    data_store.aqhi = max(1, round(aqhi))
             data_store.last_update['weather'] = now
 
         if now - data_store.last_update['sysload'] > 30:
@@ -473,7 +522,7 @@ def render_screen(epd, fonts):
     if not data_store.lock.acquire(timeout=2.0): return Himage
     try:
         weather = data_store.weather.copy()
-        aqi = data_store.aqi
+        aqhi = data_store.aqhi
         printer = data_store.printer.copy()
         cal_event = data_store.calendar.copy()
         claude = data_store.claude.copy()
@@ -651,23 +700,24 @@ def render_screen(epd, fonts):
 
         aqi_x = col2_x + 180
         draw.text((aqi_x, y_c2 + 10), "AIR QUALITY", font=fonts['20'], fill=0)
-        draw.text((aqi_x, y_c2 + 55), "AQI:", font=fonts['28'], fill=0)
+        draw.text((aqi_x, y_c2 + 55), "AQHI:", font=fonts['28'], fill=0)
 
-        aqi_str = str(aqi)
+        aqhi_str = str(aqhi)
         try:
-            bbox = draw.textbbox((0, 0), aqi_str, font=fonts['80'])
+            bbox = draw.textbbox((0, 0), aqhi_str, font=fonts['80'])
             tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
         except AttributeError:
-            tw, th = draw.textsize(aqi_str, font=fonts['80'])
+            tw, th = draw.textsize(aqhi_str, font=fonts['80'])
 
         val_x, val_y = aqi_x + 80, y_c2 + 66
 
-        if aqi >= 50:
+        # AQHI 7+ is high risk (vs AQI 50+)
+        if aqhi >= 7:
             pad = 20
             draw.rectangle((val_x - pad, val_y - pad + 15, val_x + tw + pad, val_y + th + pad - 5), fill=0)
-            draw.text((val_x, val_y), aqi_str, font=fonts['80'], fill=255)
+            draw.text((val_x, val_y), aqhi_str, font=fonts['80'], fill=255)
         else:
-            draw.text((val_x, val_y), aqi_str, font=fonts['80'], fill=0)
+            draw.text((val_x, val_y), aqhi_str, font=fonts['80'], fill=0)
 
         draw.line((col2_x, 320, col2_x + col_w - 40, 320), fill=0, width=2)
 
@@ -740,7 +790,7 @@ def render_screen(epd, fonts):
 
     # 3. Calendar
     cal_y = 395
-    draw_icon(draw, col3_x, cal_y, "icon_mail", (50, 50))
+    draw_icon(draw, col3_x, cal_y, "icon_calendar", (50, 50))
     draw.text((col3_x + 60, cal_y), "NEXT EVENT", font=fonts['24'], fill=0)
     if ENABLE_CALENDAR and cal_event.get('title'):
         title = cal_event['title']

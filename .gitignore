@@ -1,0 +1,8 @@
+config.py
+claude_creds.json
+usage.json
+limits.json
+*.log
+*.pkl
+*.pyc
+__pycache__/
