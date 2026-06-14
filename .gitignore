@@ -1,5 +1,6 @@
 config.py
 claude_creds.json
+strava_token.json
 usage.json
 limits.json
 *.log
