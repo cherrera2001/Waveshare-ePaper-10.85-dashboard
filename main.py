@@ -333,15 +333,21 @@ def _garmin_client():
         return None
 
     # Save session so future calls skip the login endpoint.
-    # garminconnect uses garth internally; install it with:
-    #   pip install garth --break-system-packages
+    # Requires garth: pip install garth --break-system-packages
+    # Also ensure garminconnect is up to date: pip install garminconnect --upgrade --break-system-packages
     try:
         os.makedirs(GARMIN_TOKEN_DIR, exist_ok=True)
-        client.garth.dump(GARMIN_TOKEN_DIR)
+        g = getattr(client, 'garth', None)
+        if g is None:
+            raise AttributeError("client.garth not found — upgrade garminconnect")
+        # garth <0.4 uses .dump(), newer versions use .save()
+        if hasattr(g, 'dump'):
+            g.dump(GARMIN_TOKEN_DIR)
+        else:
+            g.save(GARMIN_TOKEN_DIR)
         logging.info("Garmin session saved to %s", GARMIN_TOKEN_DIR)
-    except AttributeError:
-        logging.warning("Could not save Garmin session: garth not available — "
-                        "run: pip install garth --break-system-packages")
+    except Exception as e:
+        logging.warning("Could not save Garmin session: %s", e)
 
     return client
 
@@ -465,12 +471,18 @@ def update_data_thread():
                     data_store.aqhi = max(1, round(aqhi))
             data_store.last_update['weather'] = now
 
-        if ENABLE_GARMIN and now - data_store.last_update['garmin'] > 900:
+        garmin_interval = data_store.last_update.get('garmin_backoff', 900)
+        if ENABLE_GARMIN and now - data_store.last_update['garmin'] > garmin_interval:
             g_data = fetch_garmin_data()
             if g_data:
                 with data_store.lock:
                     data_store.garmin = g_data
                     data_store.needs_full_refresh = True
+                data_store.last_update['garmin_backoff'] = 900   # reset to normal
+            else:
+                # Back off for 1 hour on failure (likely 429 rate limit)
+                data_store.last_update['garmin_backoff'] = 3600
+                logging.warning("Garmin fetch failed — backing off for 1 hour")
             data_store.last_update['garmin'] = now
 
         if ENABLE_BAMBU:
