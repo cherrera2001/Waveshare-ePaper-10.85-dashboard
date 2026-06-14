@@ -136,6 +136,35 @@ def _ensure_calendar_icon():
 
 _ensure_calendar_icon()
 
+
+def _ensure_run_icon():
+    path = os.path.join(ICON_DIR, 'icon_run.bmp')
+    if os.path.exists(path):
+        return
+    try:
+        S = 60
+        img = Image.new('1', (S, S), 1)
+        d = ImageDraw.Draw(img)
+        # Head
+        d.ellipse([30, 2, 44, 16], outline=0, width=2)
+        # Body (leaning forward)
+        d.line([37, 16, 28, 34], fill=0, width=3)
+        # Front arm (reaching forward)
+        d.line([35, 20, 50, 14], fill=0, width=2)
+        # Back arm (swinging back)
+        d.line([33, 22, 18, 30], fill=0, width=2)
+        # Front leg (extended forward)
+        d.line([28, 34, 42, 46], fill=0, width=3)
+        d.line([42, 46, 50, 46], fill=0, width=2)
+        # Back leg (bent behind)
+        d.line([28, 34, 16, 44], fill=0, width=3)
+        d.line([16, 44, 20, 56], fill=0, width=2)
+        img.save(path)
+    except Exception as e:
+        logging.warning(f"Could not generate run icon: {e}")
+
+_ensure_run_icon()
+
 icon_cache = {}
 global_printer = None
 
@@ -641,7 +670,7 @@ def render_screen(epd, fonts):
     draw.text((col1_x + 100, y1 + 90), f"{garmin['bike_total']}km", font=fonts['20'], fill=0)
     draw_icon(draw, col1_x + 190, y1 + 85, "icon_hike", (28, 28))
     draw.text((col1_x + 220, y1 + 90), f"{garmin['hike_total']}km", font=fonts['20'], fill=0)
-    draw_icon(draw, col1_x + 310, y1 + 85, "icon_rocket", (28, 28))
+    draw_icon(draw, col1_x + 310, y1 + 85, "icon_run", (28, 28))
     draw.text((col1_x + 340, y1 + 90), f"{garmin['run_total']}km", font=fonts['20'], fill=0)
 
     draw.line((col1_x, 150, col_w - 20, 150), fill=0, width=2)
