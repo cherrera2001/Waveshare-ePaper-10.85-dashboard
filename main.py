@@ -242,6 +242,7 @@ class DataStore:
         self.claude = {'error': False, 'five_hour': {}, 'seven_day': {}}
         self.antigravity = {'error': False, 'models': []}
         self.ping = {'current': 0, 'history': deque(maxlen=50)}
+        self.needs_full_refresh = False  # set by data thread when content changes
 
         self.last_update = {
             'weather': 0, 'printer': 0, 'calendar': 0,
@@ -446,7 +447,9 @@ def update_data_thread():
             w_data = net.get_json(weather_url)
             a_data = net.get_json(aqi_url)
             with data_store.lock:
-                if w_data: data_store.weather = w_data
+                if w_data:
+                    data_store.weather = w_data
+                    data_store.needs_full_refresh = True
                 if a_data and 'current' in a_data:
                     cur = a_data['current']
                     # open-meteo gives O3 and NO2 in µg/m³; AQHI formula needs ppb
@@ -467,6 +470,7 @@ def update_data_thread():
             if g_data:
                 with data_store.lock:
                     data_store.garmin = g_data
+                    data_store.needs_full_refresh = True
             data_store.last_update['garmin'] = now
 
         if ENABLE_BAMBU:
@@ -568,6 +572,7 @@ def update_data_thread():
                         data_store.calendar = {'title': next_event[0], 'start': next_event[1]}
                     else:
                         data_store.calendar = {'title': 'No upcoming events', 'start': None}
+                    data_store.needs_full_refresh = True
             except Exception as e:
                 logging.error(f"Calendar fetch error: {e}")
             data_store.last_update['calendar'] = now
@@ -1001,7 +1006,6 @@ def main():
         t_data.start()
 
         last_full_refresh_day = -1
-        partial_refresh_count = 0
 
         while True:
             start_time = time.time()
@@ -1014,32 +1018,28 @@ def main():
                 do_full = (now_dt.hour == 3 and now_dt.day != last_full_refresh_day) \
                           or _startup_full_refresh_pending
 
+                with data_store.lock:
+                    data_changed = data_store.needs_full_refresh
+                    data_store.needs_full_refresh = False
+
+                do_full = do_full or data_changed or _startup_full_refresh_pending
+
                 if do_full:
                     if _startup_full_refresh_pending:
-                        logging.info("Full Refresh cycle (startup)")
+                        logging.info("Full Refresh (startup)")
                         _startup_full_refresh_pending = False
+                    elif data_changed:
+                        logging.info("Full Refresh (data updated)")
                     else:
-                        logging.info("Full Refresh cycle (scheduled 3am)")
+                        logging.info("Full Refresh (scheduled 3am)")
                     epd.init()
                     epd.display(buf)
                     time.sleep(2)
                     epd.init_Part()
                     last_full_refresh_day = now_dt.day
-                    partial_refresh_count = 0
                 else:
-                    partial_refresh_count += 1
-                    # Full-waveform refresh every 4 cycles (~2 min). Partial waveform
-                    # only drives pixels that *changed* vs DTM1; static content (weather,
-                    # calendar, Garmin) gets no drive and drifts grey within a few cycles.
-                    if partial_refresh_count % 4 == 0:
-                        logging.info("Periodic full refresh (anti-ghost, cycle %d)", partial_refresh_count)
-                        epd.init()
-                        epd.display(buf)
-                        time.sleep(2)
-                        epd.init_Part()
-                    else:
-                        logging.info("Partial Refresh")
-                        epd.display_Partial(buf, 0, 0, epd.width, epd.height)
+                    logging.info("Partial Refresh")
+                    epd.display_Partial(buf, 0, 0, epd.width, epd.height)
 
                 signal.alarm(0)
                 del image
