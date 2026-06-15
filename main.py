@@ -962,15 +962,19 @@ def render_screen(epd, fonts, volatile):
 
 # --- MAIN LOOP ---
 def _sync_dtm1(epd, buf):
-    """Write content to DTM1 (Old Data) without triggering a display refresh.
+    """Prime BOTH RAM banks (old-data 0x10 AND new-data 0x13) of both controllers
+    with the content currently on screen, without triggering a refresh.
 
-    epd.display() always sets DTM1=0xFF (white) so the full waveform sees
-    every pixel as changed and drives them all.  After init_Part() we need
-    DTM1 to reflect what is actually on screen, otherwise the very first
-    partial refresh treats every pixel as changed (white→content) and applies
-    the partial waveform to the whole panel — causing widespread drift.
-    With DTM1 synced to content, partial refreshes only drive pixels that
-    genuinely changed (the clock digits), leaving static content untouched.
+    Two things make this necessary on this panel:
+      1. init_Part()'s hardware reset wipes the controller RAM, so the content
+         epd.display() wrote is gone — both banks must be restored.
+      2. The two controllers share the refresh trigger: any partial on the slave
+         also forces the master to repaint its full window.  If the master's
+         new-data (0x13) is stale/garbage it redraws corrupted columns; primed to
+         the on-screen content, that forced repaint is a harmless no-op.
+
+    With 0x10 == 0x13 == on-screen content, a partial only drives the pixels that
+    genuinely change (the clock), leaving everything else a no-op.
     """
     half = epd.width // 16          # bytes per half-row  (85)
     stride = half * 2               # bytes per full row  (170)
@@ -982,13 +986,20 @@ def _sync_dtm1(epd, buf):
         slave [row * half:(row + 1) * half] = buf[base + half: base + stride]
     epd.send_command_M(0x10)
     epd.send_data2_M(master)
+    epd.send_command_M(0x13)
+    epd.send_data2_M(master)
     epd.send_command_S(0x10)
+    epd.send_data2_S(slave)
+    epd.send_command_S(0x13)
     epd.send_data2_S(slave)
 
 
-def _changed_rect(buf, last, width, height):
-    """Byte-aligned bounding box (in pixels) of the bytes differing between two
-    full-frame buffers.  Returns (x0, y0, x1, y1) or None if nothing changed.
+def _changed_window(buf, last, width, height):
+    """Byte-aligned bounding box of the bytes differing between two frames, plus
+    the extracted sub-window buffer for display_Partial.  A tight rectangle keeps
+    the clock update crisp.
+
+    Returns (win_buf, x0, y0, x1, y1) in pixels, or None if nothing changed.
     A full row is width/8 bytes (170); byte column c covers pixels [c*8, c*8+8).
     """
     stride = width // 8                     # 170 bytes per row
@@ -1003,7 +1014,13 @@ def _changed_rect(buf, last, width, height):
                 if r > r1: r1 = r
     if c1 < 0:
         return None
-    return c0 * 8, r0, (c1 + 1) * 8, r1 + 1
+    c1 += 1
+    r1 += 1
+    win = bytearray()
+    for r in range(r0, r1):
+        base = r * stride
+        win += bytes(buf[base + c0: base + c1])
+    return win, c0 * 8, r0, c1 * 8, r1
 
 
 def main():
@@ -1128,12 +1145,14 @@ def main():
                         epd.init_Part()
                         _sync_dtm1(epd, last_buf if last_buf is not None else buf)
                         in_partial_mode = True
-                    # Unified partial: refresh only the changed rectangle (the
-                    # clock), driving both controllers together so the unchanged
-                    # half gets a tiny no-op window instead of corrupting.
-                    rect = _changed_rect(buf, last_buf, epd.width, epd.height)
-                    if rect is not None:
-                        epd.display_Partial_Unified(buf, *rect, passes=PARTIAL_PASSES)
+                    # Refresh only the changed rectangle (the clock), which lands
+                    # on the slave controller.  The shared refresh trigger also
+                    # repaints the master's full window, but _sync_dtm1 primed its
+                    # 0x13 with the on-screen content so that repaint is a no-op.
+                    win = _changed_window(buf, last_buf, epd.width, epd.height)
+                    if win is not None:
+                        wbuf, x0, y0, x1, y1 = win
+                        epd.display_Partial(wbuf, x0, y0, x1, y1, passes=PARTIAL_PASSES)
                     partial_count += 1
 
                 last_buf = buf
