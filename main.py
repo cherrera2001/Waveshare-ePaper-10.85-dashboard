@@ -499,6 +499,7 @@ def update_data_thread():
                         with data_store.lock:
                             data_store.claude = usage_data
                             data_store.claude['error'] = 'five_hour' not in usage_data
+                            data_store.needs_full_refresh = True
                     else:
                         with data_store.lock:
                             data_store.claude['error'] = True
@@ -1034,13 +1035,17 @@ def main():
                 now_dt = datetime.now()
                 now_ts = time.time()
 
-                # We no longer gate refreshes on this flag (content changes render
-                # fine via partial), but still clear it so it doesn't go stale.
+                # A widget's data changed (weather, garmin, calendar, claude…).
+                # Those updates redraw large regions, which ghosts badly under a
+                # partial waveform — so force a clean full refresh.  The clock
+                # ticking only flips a few digits, so that stays a partial.
                 with data_store.lock:
+                    data_changed = data_store.needs_full_refresh
                     data_store.needs_full_refresh = False
 
                 do_full = (
                     _startup_full_refresh_pending
+                    or data_changed
                     or (now_dt.hour == 3 and now_dt.day != last_full_refresh_day)
                     or partial_count >= MAX_PARTIALS_BEFORE_FULL
                     or (now_ts - last_full_refresh_ts) >= FULL_REFRESH_INTERVAL
