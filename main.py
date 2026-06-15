@@ -1005,7 +1005,24 @@ def main():
         t_data.daemon = True
         t_data.start()
 
+        # --- REFRESH STRATEGY ---
+        # Partial refreshes use a *differential* waveform: no black/white flashing,
+        # and the panel only physically drives pixels that differ between the old
+        # frame (controller reg 0x10, kept in sync by _sync_dtm1) and the new frame
+        # (0x13).  Static content is therefore never re-flashed, and ghosting only
+        # builds up on the pixels that actually change (mainly the clock digits).
+        # A periodic FULL refresh (normal flashing waveform) clears that residue.
+        #
+        # Tune these two if you still see ghosting (lower them) or want fewer
+        # flashes (raise them):
+        FULL_REFRESH_INTERVAL = 600     # secs: force a clean full refresh at least this often
+        MAX_PARTIALS_BEFORE_FULL = 20   # also force a full refresh after this many partials
+
         last_full_refresh_day = -1
+        last_full_refresh_ts = 0
+        partial_count = 0
+        last_buf = None
+        in_partial_mode = False
 
         while True:
             start_time = time.time()
@@ -1015,26 +1032,58 @@ def main():
                 buf = epd.getbuffer(image)
 
                 now_dt = datetime.now()
-                do_full = (now_dt.hour == 3 and now_dt.day != last_full_refresh_day) \
-                          or _startup_full_refresh_pending
+                now_ts = time.time()
 
+                # We no longer gate refreshes on this flag (content changes render
+                # fine via partial), but still clear it so it doesn't go stale.
                 with data_store.lock:
-                    data_changed = data_store.needs_full_refresh
                     data_store.needs_full_refresh = False
 
-                if _startup_full_refresh_pending:
-                    _startup_full_refresh_pending = False
+                do_full = (
+                    _startup_full_refresh_pending
+                    or (now_dt.hour == 3 and now_dt.day != last_full_refresh_day)
+                    or partial_count >= MAX_PARTIALS_BEFORE_FULL
+                    or (now_ts - last_full_refresh_ts) >= FULL_REFRESH_INTERVAL
+                )
 
-                # Partial refresh accumulates pixel drift on this panel regardless
-                # of DTM1 state — full refresh only.
-                logging.info("Full Refresh")
-                epd.init()
-                epd.display(buf)
-                last_full_refresh_day = now_dt.day
+                if buf == last_buf and not do_full:
+                    # Nothing changed on screen and no full refresh due — skip the
+                    # panel entirely (no flash, no partial drive).
+                    signal.alarm(0)
+                    del image, buf
+                    gc.collect()
+                    time.sleep(max(2, 30 - (time.time() - start_time)))
+                    continue
+
+                if do_full:
+                    logging.info("Full Refresh")
+                    epd.init()
+                    epd.display(buf)
+                    # Re-enter partial mode and sync the controller's "old data"
+                    # (0x10) to what is now on screen, so the next partial drives
+                    # only genuinely-changed pixels.
+                    epd.init_Part()
+                    _sync_dtm1(epd, buf)
+                    in_partial_mode = True
+                    partial_count = 0
+                    last_full_refresh_ts = now_ts
+                    last_full_refresh_day = now_dt.day
+                    _startup_full_refresh_pending = False
+                else:
+                    logging.info("Partial Refresh")
+                    if not in_partial_mode:
+                        epd.init_Part()
+                        _sync_dtm1(epd, last_buf if last_buf is not None else buf)
+                        in_partial_mode = True
+                    # Full-frame partial: differential waveform means only the
+                    # changed pixels (e.g. the clock) actually move.
+                    epd.display_Partial(buf, 0, 0, epd.width, epd.height)
+                    partial_count += 1
+
+                last_buf = buf
 
                 signal.alarm(0)
                 del image
-                del buf
                 gc.collect()
 
             except HardwareTimeoutError:
