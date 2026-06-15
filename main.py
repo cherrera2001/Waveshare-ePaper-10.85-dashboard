@@ -232,7 +232,7 @@ class DataStore:
         self.weather = {}
         self.aqhi = 0
         self.printer = {'status': 'OFFLINE'}
-        self.calendar = {'title': '', 'start': None}  # next upcoming event
+        self.calendar = {'events': []}  # list of (title, start) upcoming events
         self.garmin = {
             'rides': 0, 'total_distance': 0,
             'rides_curr': 0, 'distance_curr': 0,
@@ -527,7 +527,7 @@ def update_data_thread():
                 resp.raise_for_status()
                 cal = iCalendar.from_ical(resp.content)
                 now_dt = datetime.now(timezone.utc)
-                next_event = None
+                events = []
                 for component in cal.walk():
                     if component.name != 'VEVENT':
                         continue
@@ -537,19 +537,15 @@ def update_data_thread():
                     start = dtstart.dt
                     # Normalize date-only events to midnight UTC
                     if not hasattr(start, 'tzinfo'):
-                        from datetime import date
                         start = datetime(start.year, start.month, start.day, tzinfo=timezone.utc)
                     elif start.tzinfo is None:
                         start = start.replace(tzinfo=timezone.utc)
                     if start >= now_dt:
-                        if next_event is None or start < next_event[1]:
-                            summary = str(component.get('SUMMARY', 'No title'))
-                            next_event = (summary, start)
+                        summary = str(component.get('SUMMARY', 'No title'))
+                        events.append((summary, start))
+                events.sort(key=lambda e: e[1])
                 with data_store.lock:
-                    if next_event:
-                        data_store.calendar = {'title': next_event[0], 'start': next_event[1]}
-                    else:
-                        data_store.calendar = {'title': 'No upcoming events', 'start': None}
+                    data_store.calendar = {'events': events[:5]}
                     data_store.needs_full_refresh = True
             except Exception as e:
                 logging.error(f"Calendar fetch error: {e}")
@@ -629,12 +625,7 @@ def get_weather_icon(code, is_day=1):
     return "icon_sun"
 
 
-def render_screen(epd, fonts, volatile):
-    # `volatile` holds a frozen snapshot (ping + the time used for the slow
-    # progress bars) captured at the last full refresh.  Rendering these from the
-    # snapshot — instead of live data — keeps their pixels byte-identical between
-    # partials, so they never widen the changed-rectangle.  Only the clock and the
-    # calendar countdown (both column 3) update live during partials.
+def render_screen(epd, fonts):
     Himage = Image.new('1', (epd.width, epd.height), 255)
     draw = ImageDraw.Draw(Himage)
 
@@ -643,14 +634,13 @@ def render_screen(epd, fonts, volatile):
         weather = data_store.weather.copy()
         aqhi = data_store.aqhi
         printer = data_store.printer.copy()
-        cal_event = data_store.calendar.copy()
+        cal = data_store.calendar.copy()
         claude = data_store.claude.copy()
         antigravity = data_store.antigravity.copy()
         garmin = data_store.garmin.copy()
+        ping = data_store.ping.copy()
     finally:
         data_store.lock.release()
-
-    ping = volatile['ping']
 
     col_w = epd.width // 3
 
@@ -877,36 +867,25 @@ def render_screen(epd, fonts, volatile):
 
     draw.line((col_w * 2, 10, col_w * 2, 470), fill=0, width=2)
 
-    # --- COLUMN 3 (Time, Claude/Spotify/Progress, Gmail) ---
+    # --- COLUMN 3 (Date, Time Progress, Calendar) ---
     col3_x = col_w * 2 + 30
     dt = datetime.now()
 
-    # 1. Time & Date
-    draw.text((col3_x, 10), dt.strftime("%H:%M"), font=fonts['clock'], fill=0)
+    # 1. Date (clock removed — nothing here needs minute granularity)
+    draw.text((col3_x, 15), dt.strftime("%d %B %Y"), font=fonts['40'], fill=0)
+    draw.text((col3_x, 62), dt.strftime("%A").upper(), font=fonts['28'], fill=0)
 
-    date_str = dt.strftime("%d %B %Y")
-    day_str = dt.strftime("%a").upper()
-
-    draw.text((col3_x, 170), date_str, font=fonts['32'], fill=0)
-    draw.text((col3_x + 340, 170), day_str, font=fonts['32'], fill=0)
-
-    draw.line((col3_x, 220, epd.width - 20, 220), fill=0, width=2)
+    draw.line((col3_x, 105, epd.width - 20, 105), fill=0, width=2)
 
     # 2. Time Progress
-    sp_y = 240
-    draw.rectangle((col3_x, sp_y, col3_x + 420, sp_y + 130), fill=255)
-    tp_y = sp_y
+    tp_y = 120
     draw.text((col3_x, tp_y), "TIME PROGRESS", font=fonts['28'], fill=0)
 
-    # Progress bars use the frozen snapshot time so they only move on a full
-    # refresh — they change too slowly to be worth a partial, and rendering them
-    # live would dirty this region every cycle.
-    pdt = volatile['prog_dt']
-    day_pct = (pdt.hour * 3600 + pdt.minute * 60 + pdt.second) / 86400.0
-    days_in_m = calendar.monthrange(pdt.year, pdt.month)[1]
-    month_pct = (pdt.day - 1 + (pdt.hour / 24.0)) / days_in_m
-    days_in_y = 366 if calendar.isleap(pdt.year) else 365
-    year_pct = (pdt.timetuple().tm_yday - 1 + (pdt.hour / 24.0)) / days_in_y
+    day_pct = (dt.hour * 3600 + dt.minute * 60 + dt.second) / 86400.0
+    days_in_m = calendar.monthrange(dt.year, dt.month)[1]
+    month_pct = (dt.day - 1 + (dt.hour / 24.0)) / days_in_m
+    days_in_y = 366 if calendar.isleap(dt.year) else 365
+    year_pct = (dt.timetuple().tm_yday - 1 + (dt.hour / 24.0)) / days_in_y
 
     def draw_prog(y_offset, label, pct):
         draw.text((col3_x, tp_y + y_offset), label, font=fonts['24'], fill=0)
@@ -924,105 +903,41 @@ def render_screen(epd, fonts, volatile):
     draw_prog(75, "MONTH", month_pct)
     draw_prog(110, "YEAR", year_pct)
 
-    draw.line((col3_x, 380, epd.width - 20, 380), fill=0, width=2)
+    draw.line((col3_x, 262, epd.width - 20, 262), fill=0, width=2)
 
-    # 3. Calendar
-    cal_y = 395
-    draw_icon(draw, col3_x, cal_y, "icon_calendar", (50, 50))
-    draw.text((col3_x + 60, cal_y), "NEXT EVENT", font=fonts['24'], fill=0)
-    if ENABLE_CALENDAR and cal_event.get('title'):
-        title = cal_event['title']
-        start = cal_event.get('start')
-        # Truncate long titles to fit the column
-        max_chars = 22
-        display_title = title if len(title) <= max_chars else title[:max_chars - 1] + '…'
-        draw.text((col3_x + 60, cal_y + 28), display_title, font=fonts['28'], fill=0)
-        if start:
+    # 3. Calendar (taller now that the clock is gone — list upcoming events)
+    cal_y = 275
+    draw_icon(draw, col3_x, cal_y, "icon_calendar", (45, 45))
+    draw.text((col3_x + 55, cal_y + 8), "UPCOMING", font=fonts['28'], fill=0)
+
+    events = cal.get('events', []) if ENABLE_CALENDAR else []
+    ev_y = cal_y + 55
+    if events:
+        now_local = datetime.now()
+        for title, start in events[:3]:
             local_start = start.astimezone().replace(tzinfo=None)
-            # Use the frozen snapshot time so the countdown only changes on a full
-            # refresh — otherwise it would add another set of changing rows to the
-            # partial band every minute.
-            now_local = volatile['prog_dt']
             diff = local_start - now_local
             days = diff.days
             hours = diff.seconds // 3600
             if days > 0:
-                when = f"In {days}d {hours}h  —  {local_start.strftime('%a %d %b')}"
+                when = f"In {days}d {hours}h · {local_start.strftime('%a %d %b')}"
             elif diff.total_seconds() > 0:
                 mins = (diff.seconds % 3600) // 60
-                when = f"In {hours}h {mins}m  —  {local_start.strftime('%H:%M')}"
+                when = f"In {hours}h {mins}m · {local_start.strftime('%H:%M')}"
             else:
                 when = local_start.strftime('%a %d %b  %H:%M')
-            draw.text((col3_x + 60, cal_y + 58), when, font=fonts['20'], fill=0)
+            max_chars = 26
+            disp = title if len(title) <= max_chars else title[:max_chars - 1] + '…'
+            draw.text((col3_x, ev_y), disp, font=fonts['24'], fill=0)
+            draw.text((col3_x, ev_y + 26), when, font=fonts['20'], fill=0)
+            ev_y += 64
     else:
-        draw.text((col3_x + 60, cal_y + 28), "No events / disabled", font=fonts['24'], fill=0)
+        draw.text((col3_x, ev_y), "No upcoming events", font=fonts['24'], fill=0)
 
     return Himage
 
 
 # --- MAIN LOOP ---
-def _sync_dtm1(epd, buf):
-    """Prime BOTH RAM banks (old-data 0x10 AND new-data 0x13) of both controllers
-    with the content currently on screen, without triggering a refresh.
-
-    Two things make this necessary on this panel:
-      1. init_Part()'s hardware reset wipes the controller RAM, so the content
-         epd.display() wrote is gone — both banks must be restored.
-      2. The two controllers share the refresh trigger: any partial on the slave
-         also forces the master to repaint its full window.  If the master's
-         new-data (0x13) is stale/garbage it redraws corrupted columns; primed to
-         the on-screen content, that forced repaint is a harmless no-op.
-
-    With 0x10 == 0x13 == on-screen content, a partial only drives the pixels that
-    genuinely change (the clock), leaving everything else a no-op.
-    """
-    half = epd.width // 16          # bytes per half-row  (85)
-    stride = half * 2               # bytes per full row  (170)
-    master = bytearray(half * epd.height)
-    slave  = bytearray(half * epd.height)
-    for row in range(epd.height):
-        base = row * stride
-        master[row * half:(row + 1) * half] = buf[base       : base + half]
-        slave [row * half:(row + 1) * half] = buf[base + half: base + stride]
-    epd.send_command_M(0x10)
-    epd.send_data2_M(master)
-    epd.send_command_M(0x13)
-    epd.send_data2_M(master)
-    epd.send_command_S(0x10)
-    epd.send_data2_S(slave)
-    epd.send_command_S(0x13)
-    epd.send_data2_S(slave)
-
-
-def _changed_window(buf, last, width, height):
-    """Byte-aligned bounding box of the bytes differing between two frames, plus
-    the extracted sub-window buffer for display_Partial.  A tight rectangle keeps
-    the clock update crisp.
-
-    Returns (win_buf, x0, y0, x1, y1) in pixels, or None if nothing changed.
-    A full row is width/8 bytes (170); byte column c covers pixels [c*8, c*8+8).
-    """
-    stride = width // 8                     # 170 bytes per row
-    c0, c1, r0, r1 = stride, -1, height, -1
-    for r in range(height):
-        base = r * stride
-        for c in range(stride):
-            if buf[base + c] != last[base + c]:
-                if c < c0: c0 = c
-                if c > c1: c1 = c
-                if r < r0: r0 = r
-                if r > r1: r1 = r
-    if c1 < 0:
-        return None
-    c1 += 1
-    r1 += 1
-    win = bytearray()
-    for r in range(r0, r1):
-        base = r * stride
-        win += bytes(buf[base + c0: base + c1])
-    return win, c0 * 8, r0, c1 * 8, r1
-
-
 def main():
     auth_claude()
     auth_antigravity()
@@ -1049,7 +964,6 @@ def main():
             '40': load_font('Aldrich-Regular.ttc', 40),
             '60': load_font('Aldrich-Regular.ttc', 60),
             '80': load_font('Aldrich-Regular.ttc', 80),
-            'clock': load_font('advanced_led_board-7.ttc', 180),
         }
 
         t_data = threading.Thread(target=update_data_thread)
@@ -1057,25 +971,16 @@ def main():
         t_data.start()
 
         # --- REFRESH STRATEGY ---
-        # Partial refreshes use a *differential* waveform: no black/white flashing,
-        # and the panel only physically drives pixels that differ between the old
-        # frame (controller reg 0x10, kept in sync by _sync_dtm1) and the new frame
-        # (0x13).  Static content is therefore never re-flashed, and ghosting only
-        # builds up on the pixels that actually change (mainly the clock digits).
-        # A periodic FULL refresh (normal flashing waveform) clears that residue.
-        #
-        # Tune these two if you still see ghosting (lower them) or want fewer
-        # flashes (raise them):
-        FULL_REFRESH_INTERVAL = 600     # secs: force a clean full refresh at least this often
-        MAX_PARTIALS_BEFORE_FULL = 3    # also force a full refresh after this many partials
-        PARTIAL_PASSES = 1              # repeat each partial pulse N times (vendor uses 1)
+        # This panel only has a clean (5-6 inversion "flash") waveform and a gentle
+        # one that can't render a legible full screen, and its two controllers share
+        # one refresh — so partial/no-flash updates aren't possible here.  Without a
+        # live clock there's nothing that needs second/minute granularity, so we
+        # simply do one clean full refresh on a slow timer (and on a meaningful data
+        # change).  That keeps the flashing infrequent instead of every 30s.
+        REFRESH_INTERVAL = 600          # secs between refreshes (one flash per interval)
 
         last_full_refresh_day = -1
-        last_full_refresh_ts = 0
-        partial_count = 0
-        last_buf = None
-        in_partial_mode = False
-        volatile = None  # frozen snapshot of ping + progress-bar time (see render_screen)
+        last_refresh_ts = 0
 
         while True:
             start_time = time.time()
@@ -1084,81 +989,29 @@ def main():
                 now_dt = datetime.now()
                 now_ts = time.time()
 
-                # A widget's data changed (weather, garmin, calendar, claude…).
-                # Those updates redraw large regions, which ghosts badly under a
-                # partial waveform — so force a clean full refresh.  The clock
-                # ticking only flips a few digits, so that stays a partial.
                 with data_store.lock:
                     data_changed = data_store.needs_full_refresh
                     data_store.needs_full_refresh = False
 
-                do_full = (
+                do_refresh = (
                     _startup_full_refresh_pending
                     or data_changed
+                    or (now_ts - last_refresh_ts) >= REFRESH_INTERVAL
                     or (now_dt.hour == 3 and now_dt.day != last_full_refresh_day)
-                    or partial_count >= MAX_PARTIALS_BEFORE_FULL
-                    or (now_ts - last_full_refresh_ts) >= FULL_REFRESH_INTERVAL
                 )
 
-                # Re-snapshot the volatile widgets only on a full refresh (and the
-                # first pass).  Partials reuse this snapshot, so the ping sparkline
-                # and progress bars stay byte-identical and never dirty their region.
-                if do_full or volatile is None:
-                    with data_store.lock:
-                        volatile = {
-                            'ping': {
-                                'current': data_store.ping['current'],
-                                'history': list(data_store.ping['history']),
-                            },
-                            'prog_dt': now_dt,
-                        }
-
-                image = render_screen(epd, fonts, volatile)
-                buf = epd.getbuffer(image)
-
-                if buf == last_buf and not do_full:
-                    # Nothing changed on screen and no full refresh due — skip the
-                    # panel entirely (no flash, no partial drive).
-                    signal.alarm(0)
-                    del image, buf
-                    gc.collect()
-                    time.sleep(max(2, 30 - (time.time() - start_time)))
-                    continue
-
-                if do_full:
+                if do_refresh:
                     logging.info("Full Refresh")
+                    image = render_screen(epd, fonts)
+                    buf = epd.getbuffer(image)
                     epd.init()
                     epd.display(buf)
-                    # Re-enter partial mode and sync the controller's "old data"
-                    # (0x10) to what is now on screen, so the next partial drives
-                    # only genuinely-changed pixels.
-                    epd.init_Part()
-                    _sync_dtm1(epd, buf)
-                    in_partial_mode = True
-                    partial_count = 0
-                    last_full_refresh_ts = now_ts
+                    last_refresh_ts = now_ts
                     last_full_refresh_day = now_dt.day
                     _startup_full_refresh_pending = False
-                else:
-                    logging.info("Partial Refresh")
-                    if not in_partial_mode:
-                        epd.init_Part()
-                        _sync_dtm1(epd, last_buf if last_buf is not None else buf)
-                        in_partial_mode = True
-                    # Refresh only the changed rectangle (the clock), which lands
-                    # on the slave controller.  The shared refresh trigger also
-                    # repaints the master's full window, but _sync_dtm1 primed its
-                    # 0x13 with the on-screen content so that repaint is a no-op.
-                    win = _changed_window(buf, last_buf, epd.width, epd.height)
-                    if win is not None:
-                        wbuf, x0, y0, x1, y1 = win
-                        epd.display_Partial(wbuf, x0, y0, x1, y1, passes=PARTIAL_PASSES)
-                    partial_count += 1
-
-                last_buf = buf
+                    del image, buf
 
                 signal.alarm(0)
-                del image
                 gc.collect()
 
             except HardwareTimeoutError:
