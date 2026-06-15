@@ -629,7 +629,12 @@ def get_weather_icon(code, is_day=1):
     return "icon_sun"
 
 
-def render_screen(epd, fonts):
+def render_screen(epd, fonts, volatile):
+    # `volatile` holds a frozen snapshot (ping + the time used for the slow
+    # progress bars) captured at the last full refresh.  Rendering these from the
+    # snapshot — instead of live data — keeps their pixels byte-identical between
+    # partials, so they never widen the changed-rectangle.  Only the clock and the
+    # calendar countdown (both column 3) update live during partials.
     Himage = Image.new('1', (epd.width, epd.height), 255)
     draw = ImageDraw.Draw(Himage)
 
@@ -642,9 +647,10 @@ def render_screen(epd, fonts):
         claude = data_store.claude.copy()
         antigravity = data_store.antigravity.copy()
         garmin = data_store.garmin.copy()
-        ping = data_store.ping.copy()
     finally:
         data_store.lock.release()
+
+    ping = volatile['ping']
 
     col_w = epd.width // 3
 
@@ -892,11 +898,15 @@ def render_screen(epd, fonts):
     tp_y = sp_y
     draw.text((col3_x, tp_y), "TIME PROGRESS", font=fonts['28'], fill=0)
 
-    day_pct = (dt.hour * 3600 + dt.minute * 60 + dt.second) / 86400.0
-    days_in_m = calendar.monthrange(dt.year, dt.month)[1]
-    month_pct = (dt.day - 1 + (dt.hour / 24.0)) / days_in_m
-    days_in_y = 366 if calendar.isleap(dt.year) else 365
-    year_pct = (dt.timetuple().tm_yday - 1 + (dt.hour / 24.0)) / days_in_y
+    # Progress bars use the frozen snapshot time so they only move on a full
+    # refresh — they change too slowly to be worth a partial, and rendering them
+    # live would dirty this region every cycle.
+    pdt = volatile['prog_dt']
+    day_pct = (pdt.hour * 3600 + pdt.minute * 60 + pdt.second) / 86400.0
+    days_in_m = calendar.monthrange(pdt.year, pdt.month)[1]
+    month_pct = (pdt.day - 1 + (pdt.hour / 24.0)) / days_in_m
+    days_in_y = 366 if calendar.isleap(pdt.year) else 365
+    year_pct = (pdt.timetuple().tm_yday - 1 + (pdt.hour / 24.0)) / days_in_y
 
     def draw_prog(y_offset, label, pct):
         draw.text((col3_x, tp_y + y_offset), label, font=fonts['24'], fill=0)
@@ -973,6 +983,38 @@ def _sync_dtm1(epd, buf):
     epd.send_data2_S(slave)
 
 
+def _changed_window(buf, last, width, height):
+    """Byte-aligned bounding box of the bytes that differ between two full-frame
+    buffers, plus the extracted sub-window buffer ready for display_Partial.
+
+    The vendor demo only refreshes the small rectangle that actually changed
+    (the clock), never the whole screen — pulsing the entire panel every update
+    is what causes the heavy ghosting.  This finds that rectangle for us.
+
+    Returns (win_buf, x0, y0, x1, y1) in pixels, or None if nothing changed.
+    A full row is width/8 bytes (170); byte column c covers pixels [c*8, c*8+8).
+    """
+    stride = width // 8                     # 170 bytes per row
+    c0, c1, r0, r1 = stride, -1, height, -1
+    for r in range(height):
+        base = r * stride
+        for c in range(stride):
+            if buf[base + c] != last[base + c]:
+                if c < c0: c0 = c
+                if c > c1: c1 = c
+                if r < r0: r0 = r
+                if r > r1: r1 = r
+    if c1 < 0:
+        return None
+    c1 += 1
+    r1 += 1
+    win = bytearray()
+    for r in range(r0, r1):
+        base = r * stride
+        win += bytes(buf[base + c0: base + c1])
+    return win, c0 * 8, r0, c1 * 8, r1
+
+
 def main():
     auth_claude()
     auth_antigravity()
@@ -1018,21 +1060,19 @@ def main():
         # flashes (raise them):
         FULL_REFRESH_INTERVAL = 600     # secs: force a clean full refresh at least this often
         MAX_PARTIALS_BEFORE_FULL = 3    # also force a full refresh after this many partials
-        PARTIAL_PASSES = 3              # repeat each partial pulse N times to saturate faint text
+        PARTIAL_PASSES = 1              # repeat each partial pulse N times (vendor uses 1)
 
         last_full_refresh_day = -1
         last_full_refresh_ts = 0
         partial_count = 0
         last_buf = None
         in_partial_mode = False
+        volatile = None  # frozen snapshot of ping + progress-bar time (see render_screen)
 
         while True:
             start_time = time.time()
             try:
                 signal.alarm(60)
-                image = render_screen(epd, fonts)
-                buf = epd.getbuffer(image)
-
                 now_dt = datetime.now()
                 now_ts = time.time()
 
@@ -1051,6 +1091,22 @@ def main():
                     or partial_count >= MAX_PARTIALS_BEFORE_FULL
                     or (now_ts - last_full_refresh_ts) >= FULL_REFRESH_INTERVAL
                 )
+
+                # Re-snapshot the volatile widgets only on a full refresh (and the
+                # first pass).  Partials reuse this snapshot, so the ping sparkline
+                # and progress bars stay byte-identical and never dirty their region.
+                if do_full or volatile is None:
+                    with data_store.lock:
+                        volatile = {
+                            'ping': {
+                                'current': data_store.ping['current'],
+                                'history': list(data_store.ping['history']),
+                            },
+                            'prog_dt': now_dt,
+                        }
+
+                image = render_screen(epd, fonts, volatile)
+                buf = epd.getbuffer(image)
 
                 if buf == last_buf and not do_full:
                     # Nothing changed on screen and no full refresh due — skip the
@@ -1081,10 +1137,12 @@ def main():
                         epd.init_Part()
                         _sync_dtm1(epd, last_buf if last_buf is not None else buf)
                         in_partial_mode = True
-                    # Full-frame partial: differential waveform means only the
-                    # changed pixels (e.g. the clock) actually move.  PARTIAL_PASSES
-                    # repeats the pulse to saturate this panel's weak partial LUT.
-                    epd.display_Partial(buf, 0, 0, epd.width, epd.height, passes=PARTIAL_PASSES)
+                    # Refresh ONLY the changed rectangle (like the vendor demo),
+                    # not the whole panel — this is what keeps ghosting localized.
+                    win = _changed_window(buf, last_buf, epd.width, epd.height)
+                    if win is not None:
+                        wbuf, x0, y0, x1, y1 = win
+                        epd.display_Partial(wbuf, x0, y0, x1, y1, passes=PARTIAL_PASSES)
                     partial_count += 1
 
                 last_buf = buf
