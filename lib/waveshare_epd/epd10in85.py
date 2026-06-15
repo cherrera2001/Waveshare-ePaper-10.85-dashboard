@@ -120,22 +120,12 @@ class EPD:
         logger.debug("e-Paper busy release")
 
     def TurnOnDisplay(self):
+        # NOTE: the two controllers share gate (row) lines, so a refresh must be
+        # issued to BOTH halves together (send_command_ALL) — refreshing one
+        # controller alone corrupts the other half's pixels on the shared rows.
         self.send_command_ALL(0x12)
         epdconfig.delay_ms(100)	        # The delay here is necessary, 200uS at least!!!
         self.ReadBusy()                 # waiting for the electronic paper IC to release the idle signal
-
-    def TurnOnDisplay_M(self):
-        # Refresh ONLY the master (left) controller; the slave is left untouched
-        # because 0x12 is sent on the master chip-select alone.
-        self.send_command_M(0x12)
-        epdconfig.delay_ms(100)
-        self.ReadBusy()
-
-    def TurnOnDisplay_S(self):
-        # Refresh ONLY the slave (right) controller; the master is left untouched.
-        self.send_command_S(0x12)
-        epdconfig.delay_ms(100)
-        self.ReadBusy()
 
     def init(self):
         if (epdconfig.module_init() != 0):
@@ -811,7 +801,7 @@ class EPD:
         if Xe <= mid:
             _load_data_M(Image, Xs, Ys, win_w_px, win_h)
             for _ in range(passes):
-                self.TurnOnDisplay_M()   # master only — do not disturb the slave half
+                self.TurnOnDisplay()
             _update_old_M(Image)
             return
 
@@ -821,7 +811,7 @@ class EPD:
         if Xs >= mid:
             _load_data_S(Image, Xs - mid, Ys, win_w_px, win_h)
             for _ in range(passes):
-                self.TurnOnDisplay_S()   # slave only — do not disturb the master half
+                self.TurnOnDisplay()
             _update_old_S(Image)
             return
 

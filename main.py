@@ -939,7 +939,10 @@ def render_screen(epd, fonts, volatile):
         draw.text((col3_x + 60, cal_y + 28), display_title, font=fonts['28'], fill=0)
         if start:
             local_start = start.astimezone().replace(tzinfo=None)
-            now_local = datetime.now()
+            # Use the frozen snapshot time so the countdown only changes on a full
+            # refresh — otherwise it would add another set of changing rows to the
+            # partial band every minute.
+            now_local = volatile['prog_dt']
             diff = local_start - now_local
             days = diff.days
             hours = diff.seconds // 3600
@@ -984,36 +987,33 @@ def _sync_dtm1(epd, buf):
 
 
 def _changed_window(buf, last, width, height):
-    """Byte-aligned bounding box of the bytes differing between two full-frame
-    buffers, plus the extracted sub-window buffer for display_Partial.
+    """Full-WIDTH band covering only the rows that differ between two frames.
 
-    Refreshing only the changed rectangle (not the whole panel) is essential on
-    this display: its partial waveform agitates *every* pixel in the refreshed
-    window, so a full-frame partial ghosts everywhere.  A tight window keeps the
-    disturbance confined to what actually changed (the clock + countdown).
+    This panel's two controllers share gate (row) lines: refreshing any row
+    drives that row across the entire width, so a partial confined to one
+    controller corrupts the other half on those rows (the "shifted columns").
+    The safe unit is therefore a full-width band — both controller halves get
+    valid current data, the unchanged master half is simply rewritten to itself.
+    Restricting the band to the changed rows keeps it small (just the clock).
 
     Returns (win_buf, x0, y0, x1, y1) in pixels, or None if nothing changed.
-    A full row is width/8 bytes (170); byte column c covers pixels [c*8, c*8+8).
     """
     stride = width // 8                     # 170 bytes per row
-    c0, c1, r0, r1 = stride, -1, height, -1
+    r0, r1 = height, -1
     for r in range(height):
         base = r * stride
-        for c in range(stride):
-            if buf[base + c] != last[base + c]:
-                if c < c0: c0 = c
-                if c > c1: c1 = c
-                if r < r0: r0 = r
-                if r > r1: r1 = r
-    if c1 < 0:
+        if buf[base: base + stride] != last[base: base + stride]:
+            if r < r0:
+                r0 = r
+            r1 = r
+    if r1 < 0:
         return None
-    c1 += 1
     r1 += 1
     win = bytearray()
     for r in range(r0, r1):
         base = r * stride
-        win += bytes(buf[base + c0: base + c1])
-    return win, c0 * 8, r0, c1 * 8, r1
+        win += bytes(buf[base: base + stride])
+    return win, 0, r0, width, r1
 
 
 def main():
@@ -1138,10 +1138,9 @@ def main():
                         epd.init_Part()
                         _sync_dtm1(epd, last_buf if last_buf is not None else buf)
                         in_partial_mode = True
-                    # Refresh ONLY the changed rectangle.  display_Partial refreshes
-                    # just the controller that rectangle lands on (clock+countdown
-                    # are in column 3 → slave only), so the master half is never
-                    # disturbed — no whole-panel ghosting, no "shifted columns".
+                    # Refresh a full-width band of just the changed rows (the
+                    # clock).  Full-width is required because the controllers share
+                    # row lines; restricting to changed rows keeps the band small.
                     win = _changed_window(buf, last_buf, epd.width, epd.height)
                     if win is not None:
                         wbuf, x0, y0, x1, y1 = win
