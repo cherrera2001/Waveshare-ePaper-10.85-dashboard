@@ -983,38 +983,6 @@ def _sync_dtm1(epd, buf):
     epd.send_data2_S(slave)
 
 
-def _changed_window(buf, last, width, height):
-    """Byte-aligned bounding box of the bytes that differ between two full-frame
-    buffers, plus the extracted sub-window buffer ready for display_Partial.
-
-    The vendor demo only refreshes the small rectangle that actually changed
-    (the clock), never the whole screen — pulsing the entire panel every update
-    is what causes the heavy ghosting.  This finds that rectangle for us.
-
-    Returns (win_buf, x0, y0, x1, y1) in pixels, or None if nothing changed.
-    A full row is width/8 bytes (170); byte column c covers pixels [c*8, c*8+8).
-    """
-    stride = width // 8                     # 170 bytes per row
-    c0, c1, r0, r1 = stride, -1, height, -1
-    for r in range(height):
-        base = r * stride
-        for c in range(stride):
-            if buf[base + c] != last[base + c]:
-                if c < c0: c0 = c
-                if c > c1: c1 = c
-                if r < r0: r0 = r
-                if r > r1: r1 = r
-    if c1 < 0:
-        return None
-    c1 += 1
-    r1 += 1
-    win = bytearray()
-    for r in range(r0, r1):
-        base = r * stride
-        win += bytes(buf[base + c0: base + c1])
-    return win, c0 * 8, r0, c1 * 8, r1
-
-
 def main():
     auth_claude()
     auth_antigravity()
@@ -1137,12 +1105,14 @@ def main():
                         epd.init_Part()
                         _sync_dtm1(epd, last_buf if last_buf is not None else buf)
                         in_partial_mode = True
-                    # Refresh ONLY the changed rectangle (like the vendor demo),
-                    # not the whole panel — this is what keeps ghosting localized.
-                    win = _changed_window(buf, last_buf, epd.width, epd.height)
-                    if win is not None:
-                        wbuf, x0, y0, x1, y1 = win
-                        epd.display_Partial(wbuf, x0, y0, x1, y1, passes=PARTIAL_PASSES)
+                    # Full-frame partial: load BOTH controllers' new-data buffer.
+                    # TurnOnDisplay() issues the refresh (0x12) to both halves at
+                    # once, so each half must hold valid new data — otherwise the
+                    # un-loaded half redraws stale RAM (the "shifted columns"
+                    # artifact).  Because the volatile widgets are frozen, the only
+                    # pixels differing from the old frame are the clock + countdown,
+                    # so only those move; the rest is a no-op (old == new).
+                    epd.display_Partial(buf, 0, 0, epd.width, epd.height, passes=PARTIAL_PASSES)
                     partial_count += 1
 
                 last_buf = buf
