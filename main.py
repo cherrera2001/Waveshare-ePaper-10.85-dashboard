@@ -234,10 +234,10 @@ class DataStore:
         self.printer = {'status': 'OFFLINE'}
         self.calendar = {'events': []}  # list of (title, start) upcoming events
         self.garmin = {
-            'rides': 0, 'total_distance': 0,
-            'rides_curr': 0, 'distance_curr': 0,
-            'rides_prev': 0, 'distance_prev': 0,
-            'bike_total': 0, 'hike_total': 0, 'run_total': 0,
+            'activities': 0, 'total_distance': 0,
+            'activities_curr': 0, 'distance_curr': 0,
+            'activities_prev': 0, 'distance_prev': 0,
+            'bike_total': 0, 'foot_total': 0,
         }
         self.claude = {'error': False, 'five_hour': {}, 'seven_day': {}}
         self.antigravity = {'error': False, 'models': []}
@@ -359,16 +359,17 @@ def fetch_garmin_data():
         return None
 
     now_year = datetime.now().year
+    # Foot activities = running + walking + hiking variants, shown as one metric.
+    foot_types = {'running', 'trail_running', 'treadmill_running', 'track_running',
+                  'ultra_run', 'obstacle_run', 'indoor_running',
+                  'hiking', 'walking', 'trail_hiking'}
     bike_types = {'cycling', 'road_biking', 'mountain_biking', 'gravel_cycling',
                   'indoor_cycling', 'virtual_ride', 'e_bike_fitness', 'recumbent_cycling'}
-    hike_types = {'hiking', 'walking', 'trail_hiking'}
-    run_types  = {'running', 'trail_running', 'treadmill_running', 'track_running',
-                  'ultra_run', 'obstacle_run', 'indoor_running'}
 
-    total_rides, total_dist = 0, 0
-    rides_curr, dist_curr = 0, 0
-    rides_prev, dist_prev = 0, 0
-    bike_total, hike_total, run_total = 0, 0, 0
+    total_count, total_dist = 0, 0
+    count_curr, dist_curr = 0, 0
+    count_prev, dist_prev = 0, 0
+    bike_total, foot_total = 0, 0
 
     try:
         # Fetch all activities since start of last year in batches
@@ -390,26 +391,28 @@ def fetch_garmin_data():
         except Exception:
             continue
 
-        if type_key in bike_types:
-            total_rides += 1
-            total_dist += d
+        is_foot = type_key in foot_types
+        is_bike = type_key in bike_types
+        if not (is_foot or is_bike):
+            continue
+
+        total_count += 1
+        total_dist += d
+        if is_bike:
             bike_total += d
-            if act_year == now_year:
-                rides_curr += 1; dist_curr += d
-            elif act_year == now_year - 1:
-                rides_prev += 1; dist_prev += d
-        elif type_key in hike_types:
-            hike_total += d
-        elif type_key in run_types:
-            run_total += d
+        else:
+            foot_total += d
+        if act_year == now_year:
+            count_curr += 1; dist_curr += d
+        elif act_year == now_year - 1:
+            count_prev += 1; dist_prev += d
 
     return {
-        'rides': total_rides, 'total_distance': round(total_dist / 1000, 1),
-        'rides_curr': rides_curr, 'distance_curr': round(dist_curr / 1000, 1),
-        'rides_prev': rides_prev, 'distance_prev': round(dist_prev / 1000, 1),
+        'activities': total_count, 'total_distance': round(total_dist / 1000, 1),
+        'activities_curr': count_curr, 'distance_curr': round(dist_curr / 1000, 1),
+        'activities_prev': count_prev, 'distance_prev': round(dist_prev / 1000, 1),
         'bike_total': round(bike_total / 1000, 1),
-        'hike_total': round(hike_total / 1000, 1),
-        'run_total': round(run_total / 1000, 1),
+        'foot_total': round(foot_total / 1000, 1),
     }
 
 
@@ -679,7 +682,7 @@ def render_screen(epd, fonts):
     # --- COLUMN 1 (Widgets) ---
     col1_x = 20
 
-    # Widget 1: Strava
+    # Widget 1: Garmin (run + hike + walk combined)
     y1 = 20
     now_y = datetime.now().year
     draw_icon(draw, col1_x, y1, "icon_rocket", (60, 60))
@@ -688,14 +691,13 @@ def render_screen(epd, fonts):
               f"{now_y}: {garmin['distance_curr']} km  |  {now_y - 1}: {garmin['distance_prev']} km",
               font=fonts['20'], fill=0)
     draw.text((col1_x + 70, y1 + 60),
-              f"Total: {garmin['total_distance']} km  |  {garmin['rides']} rides",
+              f"Total: {garmin['total_distance']} km  |  {garmin['activities']} activities",
               font=fonts['20'], fill=0)
+    # Breakdown: bike, and combined run/hike/walk under the runner icon
     draw_icon(draw, col1_x + 70, y1 + 85, "icon_bike", (28, 28))
-    draw.text((col1_x + 100, y1 + 90), f"{garmin['bike_total']}km", font=fonts['20'], fill=0)
-    draw_icon(draw, col1_x + 190, y1 + 85, "icon_hike", (28, 28))
-    draw.text((col1_x + 220, y1 + 90), f"{garmin['hike_total']}km", font=fonts['20'], fill=0)
-    draw_icon(draw, col1_x + 310, y1 + 85, "icon_run", (28, 28))
-    draw.text((col1_x + 340, y1 + 90), f"{garmin['run_total']}km", font=fonts['20'], fill=0)
+    draw.text((col1_x + 105, y1 + 88), f"{garmin['bike_total']} km", font=fonts['20'], fill=0)
+    draw_icon(draw, col1_x + 250, y1 + 85, "icon_run", (28, 28))
+    draw.text((col1_x + 285, y1 + 88), f"{garmin['foot_total']} km", font=fonts['20'], fill=0)
 
     draw.line((col1_x, 150, col_w - 20, 150), fill=0, width=2)
 
