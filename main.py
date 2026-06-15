@@ -307,16 +307,45 @@ def time_until(iso_str):
 
 
 
+GARMIN_TOKENSTORE = os.path.join(BASE_DIR, '.garmin_session')
+_garmin_client_cache = None
+
+
 def _garmin_client():
+    """Return a logged-in Garmin client, reusing a cached session.
+
+    Garmin rate-limits / IP-restricts repeated username+password logins.  So we
+    log in with credentials only ONCE, persist the OAuth tokens to disk, and on
+    every later call (and after restarts) resume from those tokens — which does
+    not hit the login endpoint and won't trip the restriction.
+    """
+    global _garmin_client_cache
+    if _garmin_client_cache is not None:
+        return _garmin_client_cache
+
     try:
         from garminconnect import Garmin
     except ImportError:
         logging.error("garminconnect not installed: pip install garminconnect --break-system-packages")
         return None
 
+    # 1) Try to resume a cached session (no login request).
     try:
-        client = Garmin(GARMIN_CONF['EMAIL'], GARMIN_CONF['PASSWORD'])
-        client.login()
+        client = Garmin()
+        client.login(GARMIN_TOKENSTORE)
+        _garmin_client_cache = client
+        logging.info("Garmin: resumed session from cached tokens")
+        return client
+    except Exception as e:
+        logging.info("Garmin: no valid cached session (%s); doing a full login", e)
+
+    # 2) Full credential login — once.  login(tokenstore) persists the OAuth
+    #    tokens to that directory automatically (no more garth.dump()).
+    try:
+        client = Garmin(email=GARMIN_CONF['EMAIL'], password=GARMIN_CONF['PASSWORD'])
+        client.login(GARMIN_TOKENSTORE)
+        logging.info("Garmin: logged in and cached tokens to %s", GARMIN_TOKENSTORE)
+        _garmin_client_cache = client
         return client
     except Exception as e:
         logging.error("Garmin login failed: %s", e)
@@ -324,6 +353,7 @@ def _garmin_client():
 
 
 def fetch_garmin_data():
+    global _garmin_client_cache
     client = _garmin_client()
     if not client:
         return None
@@ -347,6 +377,8 @@ def fetch_garmin_data():
         activities = client.get_activities_by_date(start_date, end_date)
     except Exception as e:
         logging.error(f"Garmin activity fetch failed: {e}")
+        # Drop the cached client so the next cycle re-resumes / re-logs in.
+        _garmin_client_cache = None
         return None
 
     for act in activities:
