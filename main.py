@@ -1017,7 +1017,8 @@ def main():
         # Tune these two if you still see ghosting (lower them) or want fewer
         # flashes (raise them):
         FULL_REFRESH_INTERVAL = 600     # secs: force a clean full refresh at least this often
-        MAX_PARTIALS_BEFORE_FULL = 20   # also force a full refresh after this many partials
+        MAX_PARTIALS_BEFORE_FULL = 3    # also force a full refresh after this many partials
+        PARTIAL_PASSES = 3              # repeat each partial pulse N times to saturate faint text
 
         last_full_refresh_day = -1
         last_full_refresh_ts = 0
@@ -1081,8 +1082,9 @@ def main():
                         _sync_dtm1(epd, last_buf if last_buf is not None else buf)
                         in_partial_mode = True
                     # Full-frame partial: differential waveform means only the
-                    # changed pixels (e.g. the clock) actually move.
-                    epd.display_Partial(buf, 0, 0, epd.width, epd.height)
+                    # changed pixels (e.g. the clock) actually move.  PARTIAL_PASSES
+                    # repeats the pulse to saturate this panel's weak partial LUT.
+                    epd.display_Partial(buf, 0, 0, epd.width, epd.height, passes=PARTIAL_PASSES)
                     partial_count += 1
 
                 last_buf = buf

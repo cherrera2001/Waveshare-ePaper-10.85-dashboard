@@ -695,12 +695,16 @@ class EPD:
         _send_to_S(right_buf, 0, Ys, right_w_px, win_h)
     '''
 
-    def display_Partial(self, Image, Xstart, Ystart, Xend, Yend):
+    def display_Partial(self, Image, Xstart, Ystart, Xend, Yend, passes=1):
         """
         Simultaneous Partial update for 10.85" (1360x480).
         Fixes:
         1. Simultaneous refresh (no delay between screens).
         2. Correct register usage (0x10 for old data) preventing right screen crash.
+
+        `passes` repeats the refresh pulse (without reloading data) to compensate
+        for this panel's weak OTP partial waveform — a single pulse leaves text
+        faint, so 2-3 passes saturate the changed pixels to full black.
         """
         # ---- clamp to screen ----
         if Xstart < 0: Xstart = 0
@@ -793,7 +797,8 @@ class EPD:
         # ==========================================
         if Xe <= mid:
             _load_data_M(Image, Xs, Ys, win_w_px, win_h)
-            self.TurnOnDisplay()
+            for _ in range(passes):
+                self.TurnOnDisplay()
             _update_old_M(Image)
             return
 
@@ -802,7 +807,8 @@ class EPD:
         # ==========================================
         if Xs >= mid:
             _load_data_S(Image, Xs - mid, Ys, win_w_px, win_h)
-            self.TurnOnDisplay()
+            for _ in range(passes):
+                self.TurnOnDisplay()
             _update_old_S(Image)
             return
 
@@ -833,8 +839,9 @@ class EPD:
         _load_data_M(left_buf, Xs, Ys, left_w_px, win_h)
         _load_data_S(right_buf, 0, Ys, right_w_px, win_h)  # Slave starts at x=0
 
-        # 3. Simultaneous Refresh
-        self.TurnOnDisplay()
+        # 3. Simultaneous Refresh (repeat to saturate the weak partial waveform)
+        for _ in range(passes):
+            self.TurnOnDisplay()
 
         # 4. Update "Old Data" memory for next partial update
         _update_old_M(left_buf)
